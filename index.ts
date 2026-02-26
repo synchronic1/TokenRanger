@@ -114,11 +114,18 @@ const tokenRangerPlugin = {
         return;
       }
 
-      // Compute strategy/model overrides from inferenceMode
-      const strategyOverride =
-        cfg.inferenceMode === "cpu"    ? "light" :
-        cfg.inferenceMode === "gpu"    ? "full"  :
-        cfg.inferenceMode === "remote" ? "full"  : undefined;
+      // Compute strategy/model overrides from inferenceMode and compressionStrategy
+      let strategyOverride: string | undefined;
+      if (cfg.compressionStrategy !== "auto") {
+        // Explicit compressionStrategy takes priority
+        strategyOverride = cfg.compressionStrategy;
+      } else if (cfg.inferenceMode !== "auto") {
+        // inferenceMode maps to strategy
+        strategyOverride =
+          cfg.inferenceMode === "cpu"    ? "light" :
+          cfg.inferenceMode === "gpu"    ? "full"  :
+          cfg.inferenceMode === "remote" ? "full"  : undefined;
+      }
 
       const modelOverride = cfg.preferredModel && cfg.preferredModel !== "mistral:7b"
         ? cfg.preferredModel
@@ -473,11 +480,12 @@ const tokenRangerPlugin = {
                 ? opts.venvPath
                 : resolveServiceDir();
             // Resolve the plugin directory (where service/ files live)
-            // dist/index.js → go up one level to get plugin root
-            const pluginDir = path.resolve(
-              path.dirname(fileURLToPath(import.meta.url)),
-              "..",
-            );
+            // When loaded as ./index.ts, dirname is already the plugin root.
+            // When loaded as dist/index.js, we need to go up one level.
+            const thisDir = path.dirname(fileURLToPath(import.meta.url));
+            const pluginDir = path.basename(thisDir) === "dist"
+              ? path.resolve(thisDir, "..")
+              : thisDir;
 
             console.log(`  Install directory: ${serviceDir}\n`);
 

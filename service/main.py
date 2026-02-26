@@ -91,8 +91,12 @@ async def compress(req: CompressRequest):
 @app.get("/health")
 async def health():
     profile = await router.probe()
+    if profile.compute_class.value == "unavailable":
+        status = "degraded"
+    else:
+        status = "ok"
     return {
-        "status": "ok",
+        "status": status,
         "compute_class": profile.compute_class.value,
         "endpoint": profile.endpoint_url,
         "model": profile.model,
