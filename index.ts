@@ -127,9 +127,7 @@ const tokenRangerPlugin = {
           cfg.inferenceMode === "remote" ? "full"  : undefined;
       }
 
-      const modelOverride = cfg.preferredModel && cfg.preferredModel !== "mistral:7b"
-        ? cfg.preferredModel
-        : undefined;
+      const modelOverride = cfg.preferredModel || undefined;
 
       try {
         const result = await compressContext({
@@ -150,6 +148,11 @@ const tokenRangerPlugin = {
             `(${result.reductionPct}% reduction, ${result.latencyMs}ms, ${result.computeClass})`,
         );
 
+        // Note: prependContext is the only context-injection mechanism available
+        // in the before_agent_start hook (same pattern as memory-lancedb).
+        // The SDK does not currently support replacing session messages from hooks.
+        // The compressed summary is prepended to the prompt, providing a dense
+        // representation that works alongside the gateway's context-window management.
         return {
           prependContext: result.compressedContext,
         };

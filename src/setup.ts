@@ -233,10 +233,8 @@ export function pullOllamaModel(model: string, ollamaUrl: string, logger: Logger
 
   ensureOllamaRunning(logger);
 
-  // Resolve model — use default if empty or generic
-  const resolvedModel = model && model !== "mistral:7b"
-    ? model
-    : DEFAULT_GPU_MODEL;
+  // Resolve model — use default if empty
+  const resolvedModel = model || DEFAULT_GPU_MODEL;
 
   // Check if model already exists
   try {
