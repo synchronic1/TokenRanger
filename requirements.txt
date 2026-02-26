@@ -1,0 +1,48 @@
+# TokenRanger — Full Dependency Requirements
+#
+# This file declares ALL dependencies needed to run the TokenRanger
+# context compression extension. Run "openclaw tokenranger setup" to
+# install everything automatically.
+#
+# ─── System Dependencies ───────────────────────────────────────────
+#
+# Python >= 3.10          (required)
+# pip                     (required, comes with Python)
+# Ollama >= 0.3.0         (required, auto-installed by setup if missing)
+#   Install manually:
+#     Linux:  curl -fsSL https://ollama.com/install.sh | sh
+#     macOS:  brew install ollama
+#     All:    https://ollama.com/download
+#
+# ─── Default Ollama Model ─────────────────────────────────────────
+#
+# The setup command pulls this model automatically on first install.
+# Change via /tokenranger model or config preferredModel field.
+#
+# GPU (full strategy):    mistral:7b-instruct   (~4.1GB, recommended)
+# CPU (light strategy):   phi3.5:latest         (~2.2GB, fallback)
+#
+ollama:mistral:7b-instruct
+#
+# ─── Python Service Dependencies ──────────────────────────────────
+#
+# These are installed into an isolated venv at:
+#   ~/.openclaw/services/tokenranger/venv/
+#
+# See service/requirements.txt for the pip-installable list.
+#
+fastapi>=0.115.0
+uvicorn>=0.34.0
+httpx>=0.27.0
+langchain-ollama>=0.3.0
+langchain-core>=0.3.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+#
+# ─── Node.js Dependencies ─────────────────────────────────────────
+#
+# Dev only (TypeScript build). Installed via npm install.
+# See package.json for the full list.
+#
+# @types/node ^22.0.0
+# typescript ^5.6.0

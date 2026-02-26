@@ -1,0 +1,581 @@
+/**
+ * OpenClaw TokenRanger Plugin
+ *
+ * Compresses session context via a local SLM (Ollama) before sending
+ * to expensive cloud LLMs, reducing token costs by 50-80%.
+ *
+ * Architecture:
+ *   before_agent_start hook → HTTP POST localhost:8100/compress →
+ *   FastAPI (LangChain + Ollama) → compressed context →
+ *   { prependContext } returned to gateway
+ *
+ * Install: openclaw tokenranger setup
+ */
+
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseConfig, tokenRangerConfigSchema } from "./src/config.js";
+import type { TokenRangerConfig } from "./src/config.js";
+import { checkServiceHealth } from "./src/health.js";
+import { compressContext } from "./src/compress-client.js";
+import { detectPlatform, resolveServiceDir } from "./src/platform.js";
+import {
+  checkPrerequisites,
+  installOllama,
+  installPythonService,
+  pullOllamaModel,
+  installLaunchdService,
+  installSystemdService,
+  uninstallService,
+  verifySetup,
+} from "./src/setup.js";
+
+const tokenRangerPlugin = {
+  id: "tokenranger",
+  name: "TokenRanger",
+  description:
+    "Compresses session context via local SLM before cloud LLM calls, reducing token costs by 50-80%",
+  configSchema: tokenRangerConfigSchema,
+
+  register(api: any) {
+    // Mutable cfg — updated in-memory by /tokenranger command, takes effect immediately
+    let cfg: TokenRangerConfig = parseConfig(api.pluginConfig);
+
+    // ========================================================================
+    // Health check on gateway start
+    // ========================================================================
+
+    api.on("gateway_start", async () => {
+      try {
+        const health = await checkServiceHealth(cfg.serviceUrl);
+        if (health.status === "unavailable") {
+          api.logger.warn(
+            `[tokenranger] Compression service not running at ${cfg.serviceUrl}. ` +
+              `Run: openclaw tokenranger setup`,
+          );
+        } else {
+          api.logger.info(
+            `[tokenranger] Service healthy: ` +
+              `strategy=${health.strategy}, model=${health.model}, compute=${health.computeClass}`,
+          );
+        }
+      } catch {
+        api.logger.warn(
+          `[tokenranger] Could not reach service at ${cfg.serviceUrl}. ` +
+            `Run: openclaw tokenranger setup`,
+        );
+      }
+    });
+
+    // ========================================================================
+    // Core hook: compress context before agent start
+    // ========================================================================
+
+    api.on("before_agent_start", async (event: any) => {
+      // Build session history from messages
+      let sessionHistory = "";
+      if (event.messages && Array.isArray(event.messages)) {
+        const parts: string[] = [];
+        for (const msg of event.messages) {
+          if (!msg || typeof msg !== "object") continue;
+          const m = msg as Record<string, unknown>;
+          const role = m.role as string;
+          // Handle both string content and array content blocks
+          let content = "";
+          if (typeof m.content === "string") {
+            content = m.content;
+          } else if (Array.isArray(m.content)) {
+            content = (m.content as any[])
+              .filter((c: any) => c && typeof c === "object" && c.type === "text")
+              .map((c: any) => c.text ?? "")
+              .join(" ");
+          }
+          if (content && (role === "user" || role === "assistant")) {
+            parts.push(`${role}: ${content}`);
+          }
+        }
+        sessionHistory = parts.join("\n\n");
+      }
+
+      // Debug: log hook invocation details
+      api.logger.debug(
+        `[tokenranger] before_agent_start: ` +
+          `messages=${event.messages?.length ?? 0}, ` +
+          `historyLen=${sessionHistory.length}, ` +
+          `minRequired=${cfg.minPromptLength}, ` +
+          `prompt=${(event.prompt ?? "").substring(0, 80)}`
+      );
+
+      // Skip if history is too short to benefit from compression
+      if (sessionHistory.length < cfg.minPromptLength) {
+        api.logger.debug(
+          `[tokenranger] Skipping: history too short (${sessionHistory.length} < ${cfg.minPromptLength})`
+        );
+        return;
+      }
+
+      // Compute strategy/model overrides from inferenceMode
+      const strategyOverride =
+        cfg.inferenceMode === "cpu"    ? "light" :
+        cfg.inferenceMode === "gpu"    ? "full"  :
+        cfg.inferenceMode === "remote" ? "full"  : undefined;
+
+      const modelOverride = cfg.preferredModel && cfg.preferredModel !== "mistral:7b"
+        ? cfg.preferredModel
+        : undefined;
+
+      try {
+        const result = await compressContext({
+          prompt: event.prompt ?? "",
+          sessionHistory,
+          serviceUrl: cfg.serviceUrl,
+          timeoutMs: cfg.timeoutMs,
+          strategyOverride,
+          modelOverride,
+        });
+
+        if (!result || result.reductionPct < 5) {
+          return;
+        }
+
+        api.logger.info(
+          `[tokenranger] Compressed: ${result.originalChars} → ${result.compressedChars} chars ` +
+            `(${result.reductionPct}% reduction, ${result.latencyMs}ms, ${result.computeClass})`,
+        );
+
+        return {
+          prependContext: result.compressedContext,
+        };
+      } catch (err) {
+        // Graceful degradation: proceed without compression
+        api.logger.warn(
+          `[tokenranger] Compression failed, passing through: ${String(err)}`,
+        );
+      }
+    });
+
+    // ========================================================================
+    // Slash command: /tokenranger — interactive settings
+    // ========================================================================
+
+    api.registerCommand({
+      name: "tokenranger",
+      description: "TokenRanger settings — mode, model, enable/disable",
+      acceptsArgs: true,
+      handler: async (ctx: any) => {
+        const args = (ctx.args ?? "").trim();
+        const isTelegram = ctx.channel === "telegram";
+        const isDiscord = ctx.channel === "discord";
+
+        // Helper: persist a config change to disk and update in-memory
+        async function updatePluginConfig(patch: Partial<TokenRangerConfig>) {
+          Object.assign(cfg, patch);
+          try {
+            const fresh = api.runtime.config.loadConfig();
+            const entries = fresh.plugins?.entries ?? {};
+            const entry = entries["tokenranger"] ?? {};
+            const entryConfig = entry.config ?? {};
+            Object.assign(entryConfig, patch);
+            entry.config = entryConfig;
+            entries["tokenranger"] = entry;
+            fresh.plugins = fresh.plugins ?? {};
+            fresh.plugins.entries = entries;
+            await api.runtime.config.writeConfigFile(fresh);
+          } catch (err) {
+            api.logger.warn(`[tokenranger] config write failed: ${String(err)}`);
+          }
+        }
+
+        // ── /tokenranger (no args) — Main Menu ──────────────────────────
+        if (!args) {
+          let serviceInfo = "unreachable";
+          try {
+            const health = await checkServiceHealth(cfg.serviceUrl, 2000);
+            if (health.status === "healthy") {
+              serviceInfo = `healthy | ${health.computeClass ?? "?"} | ${health.model ?? "?"}`;
+            } else if (health.status === "degraded") {
+              serviceInfo = "degraded";
+            }
+          } catch { /* keep unreachable */ }
+
+          const mode = cfg.inferenceMode ?? "auto";
+          const model = cfg.preferredModel ?? "(default)";
+          const shortModel = model.length > 12 ? model.slice(0, 12) : model;
+
+          let enabled = true;
+          try {
+            const fresh = api.runtime.config.loadConfig();
+            enabled = fresh.plugins?.entries?.["tokenranger"]?.enabled !== false;
+          } catch { /* assume enabled */ }
+
+          const text = [
+            "TokenRanger Settings",
+            "",
+            `Service: ${serviceInfo}`,
+            `Mode: ${mode} | Model: ${model}`,
+            `Enabled: ${enabled ? "yes" : "no"}`,
+          ].join("\n");
+
+          if (isTelegram) {
+            return {
+              text,
+              channelData: {
+                telegram: {
+                  buttons: [
+                    [
+                      { text: `Mode: ${mode}`, callback_data: "/tokenranger mode" },
+                      { text: `Model: ${shortModel}`, callback_data: "/tokenranger model" },
+                    ],
+                    [
+                      { text: enabled ? "Enabled: ON" : "Enabled: OFF", callback_data: "/tokenranger toggle" },
+                    ],
+                  ],
+                },
+              },
+            };
+          }
+
+          if (isDiscord) {
+            return {
+              text: [
+                "**TokenRanger Settings**",
+                "",
+                `> **Service:** ${serviceInfo}`,
+                `> **Mode:** ${mode} | **Model:** ${model}`,
+                `> **Enabled:** ${enabled ? "yes" : "no"}`,
+                "",
+                "**Commands:**",
+                "`/tokenranger mode` — set inference mode (cpu/gpu/remote/auto)",
+                "`/tokenranger model` — select Ollama model",
+                "`/tokenranger toggle` — enable/disable",
+              ].join("\n"),
+            };
+          }
+
+          return { text };
+        }
+
+        // ── /tokenranger mode ────────────────────────────────────────────
+        if (args === "mode") {
+          const current = cfg.inferenceMode ?? "auto";
+          const text = `Select inference mode (current: ${current}):`;
+
+          if (isTelegram) {
+            return {
+              text,
+              channelData: {
+                telegram: {
+                  buttons: [
+                    [
+                      { text: "CPU", callback_data: "/tokenranger mode cpu" },
+                      { text: "GPU", callback_data: "/tokenranger mode gpu" },
+                    ],
+                    [
+                      { text: "Remote", callback_data: "/tokenranger mode remote" },
+                      { text: "Auto", callback_data: "/tokenranger mode auto" },
+                    ],
+                    [
+                      { text: "<< Back", callback_data: "/tokenranger" },
+                    ],
+                  ],
+                },
+              },
+            };
+          }
+
+          if (isDiscord) {
+            return {
+              text: [
+                `**Inference Mode** (current: \`${current}\`)`,
+                "",
+                "`/tokenranger mode cpu` — light strategy, local CPU Ollama",
+                "`/tokenranger mode gpu` — full strategy, local GPU Ollama",
+                "`/tokenranger mode remote` — full strategy, remote Ollama",
+                "`/tokenranger mode auto` — auto-detect via Ollama probe",
+              ].join("\n"),
+            };
+          }
+
+          return {
+            text: text + "\nOptions: cpu, gpu, remote, auto\nUse: /tokenranger mode <option>",
+          };
+        }
+
+        // ── /tokenranger mode <value> ────────────────────────────────────
+        const modeMatch = args.match(/^mode (auto|cpu|gpu|remote)$/);
+        if (modeMatch) {
+          const newMode = modeMatch[1] as "auto" | "cpu" | "gpu" | "remote";
+          await updatePluginConfig({ inferenceMode: newMode });
+
+          const desc =
+            newMode === "cpu"    ? "light strategy, local Ollama" :
+            newMode === "gpu"    ? "full strategy, local GPU Ollama" :
+            newMode === "remote" ? "full strategy, remote Ollama" :
+                                   "auto-detect via Ollama probe";
+
+          api.logger.info(`[tokenranger] inferenceMode set to ${newMode}`);
+          return { text: `Inference mode set to: ${newMode} (${desc})` };
+        }
+
+        // ── /tokenranger model ───────────────────────────────────────────
+        if (args === "model") {
+          let models: string[] = [];
+          try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 3000);
+            const res = await fetch(`${cfg.ollamaUrl}/api/tags`, {
+              signal: controller.signal,
+            });
+            clearTimeout(timer);
+            const data = (await res.json()) as { models?: Array<{ name: string }> };
+            models = (data.models ?? []).map((m) => m.name);
+          } catch {
+            return { text: `Could not reach Ollama at ${cfg.ollamaUrl} to list models.` };
+          }
+
+          if (models.length === 0) {
+            return { text: "No models found in Ollama. Pull a model first: ollama pull mistral:7b" };
+          }
+
+          const current = cfg.preferredModel ?? "";
+
+          if (isTelegram) {
+            const buttonRows: Array<Array<{ text: string; callback_data: string }>> = [];
+            for (let i = 0; i < Math.min(models.length, 8); i += 2) {
+              const row: Array<{ text: string; callback_data: string }> = [];
+              for (let j = i; j < Math.min(i + 2, models.length, 8); j++) {
+                const name = models[j];
+                const label = name === current
+                  ? `${name.slice(0, 18)} ✓`
+                  : name.slice(0, 20);
+                const cbData = `/tokenranger model ${name}`;
+                // Telegram 64-byte callback_data limit
+                row.push({
+                  text: label,
+                  callback_data: cbData.length <= 64
+                    ? cbData
+                    : `/tokenranger model ${name.slice(0, 44)}`,
+                });
+              }
+              buttonRows.push(row);
+            }
+            buttonRows.push([{ text: "<< Back", callback_data: "/tokenranger" }]);
+
+            return {
+              text: `Select model (current: ${current || "default"}):`,
+              channelData: { telegram: { buttons: buttonRows } },
+            };
+          }
+
+          const list = models
+            .map((m) => m === current ? `  ${m} (current)` : `  ${m}`)
+            .join("\n");
+
+          if (isDiscord) {
+            const dList = models
+              .map((m) => m === current ? `- \`${m}\` **(current)**` : `- \`${m}\``)
+              .join("\n");
+            return {
+              text: `**Available Models** (current: \`${current || "default"}\`)\n\n${dList}\n\nSet with: \`/tokenranger model <name>\``,
+            };
+          }
+
+          return { text: `Available models:\n${list}\n\nUse: /tokenranger model <name>` };
+        }
+
+        // ── /tokenranger model <name> ────────────────────────────────────
+        const modelMatch = args.match(/^model (.+)$/);
+        if (modelMatch) {
+          const newModel = modelMatch[1].trim();
+          await updatePluginConfig({ preferredModel: newModel });
+          api.logger.info(`[tokenranger] preferredModel set to ${newModel}`);
+          return { text: `Preferred model set to: ${newModel}` };
+        }
+
+        // ── /tokenranger toggle ──────────────────────────────────────────
+        if (args === "toggle") {
+          try {
+            const fresh = api.runtime.config.loadConfig();
+            const entries = fresh.plugins?.entries ?? {};
+            const entry = entries["tokenranger"] ?? {};
+            const currentEnabled = entry.enabled !== false;
+            const newEnabled = !currentEnabled;
+            entry.enabled = newEnabled;
+            entries["tokenranger"] = entry;
+            fresh.plugins = fresh.plugins ?? {};
+            fresh.plugins.entries = entries;
+            await api.runtime.config.writeConfigFile(fresh);
+            api.logger.info(`[tokenranger] plugin ${newEnabled ? "enabled" : "disabled"}`);
+            return {
+              text: `TokenRanger ${newEnabled ? "enabled" : "disabled"}. Restart gateway to take effect.`,
+            };
+          } catch (err) {
+            return { text: `Failed to toggle: ${String(err)}` };
+          }
+        }
+
+        // ── fallback ─────────────────────────────────────────────────────
+        return {
+          text: "Usage: /tokenranger [mode|model|toggle]\n\n" +
+            "/tokenranger — show settings\n" +
+            "/tokenranger mode — set inference mode (cpu/gpu/remote/auto)\n" +
+            "/tokenranger model — select Ollama model\n" +
+            "/tokenranger toggle — enable/disable",
+        };
+      },
+    });
+
+    // ========================================================================
+    // CLI: setup / status / uninstall
+    // ========================================================================
+
+    api.registerCli(
+      ({ program }: { program: any }) => {
+        const cmd = program
+          .command("tokenranger")
+          .description("TokenRanger context compression plugin commands");
+
+        cmd
+          .command("setup")
+          .description(
+            "Install the Python compression service and Ollama models",
+          )
+          .option("--skip-ollama", "Skip Ollama model pull")
+          .option("--skip-service", "Skip system service creation")
+          .option(
+            "--venv-path <path>",
+            "Custom installation directory",
+          )
+          .action(async (opts: Record<string, unknown>) => {
+            const logger = {
+              info: (msg: string) => console.log(msg),
+              warn: (msg: string) => console.log(`⚠ ${msg}`),
+              error: (msg: string) => console.error(`✗ ${msg}`),
+            };
+
+            console.log("\n  TokenRanger — Setup\n");
+            console.log("  Checking prerequisites...");
+
+            if (!checkPrerequisites(logger)) {
+              console.error(
+                "\n  Prerequisites not met. Install python3 >= 3.10 and pip, then retry.",
+              );
+              process.exit(1);
+            }
+
+            const platform = detectPlatform();
+            console.log(
+              `\n  Platform: ${platform.os} (${platform.serviceManager})`,
+            );
+
+            const serviceDir =
+              typeof opts.venvPath === "string"
+                ? opts.venvPath
+                : resolveServiceDir();
+            // Resolve the plugin directory (where service/ files live)
+            // dist/index.js → go up one level to get plugin root
+            const pluginDir = path.resolve(
+              path.dirname(fileURLToPath(import.meta.url)),
+              "..",
+            );
+
+            console.log(`  Install directory: ${serviceDir}\n`);
+
+            // Step 1: Install Ollama (if missing)
+            if (!opts.skipOllama) {
+              console.log("  Step 1/5: Checking Ollama...");
+              installOllama(logger);
+            } else {
+              console.log("  Step 1/5: Skipped Ollama install");
+            }
+
+            // Step 2: Install Python service
+            console.log("\n  Step 2/5: Installing Python service...");
+            installPythonService(serviceDir, pluginDir, logger);
+
+            // Step 3: Pull default Ollama model
+            if (!opts.skipOllama) {
+              console.log("\n  Step 3/5: Pulling Ollama model...");
+              pullOllamaModel(cfg.preferredModel, cfg.ollamaUrl, logger);
+            } else {
+              console.log("\n  Step 3/5: Skipped Ollama model pull");
+            }
+
+            // Step 4: Install system service
+            if (!opts.skipService) {
+              console.log("\n  Step 4/5: Installing system service...");
+              if (platform.serviceManager === "launchd") {
+                installLaunchdService(serviceDir, pluginDir, cfg, logger);
+              } else if (platform.serviceManager === "systemd") {
+                installSystemdService(serviceDir, pluginDir, cfg, logger);
+              } else {
+                logger.warn(
+                  "  No supported service manager. Start manually:",
+                );
+                logger.info(
+                  `  cd ${serviceDir} && venv/bin/uvicorn main:app --host 127.0.0.1 --port 8100`,
+                );
+              }
+            } else {
+              console.log("\n  Step 4/5: Skipped system service creation");
+            }
+
+            // Step 5: Verify
+            console.log("\n  Step 5/5: Verifying...");
+            const ok = await verifySetup(cfg.serviceUrl, logger);
+            if (ok) {
+              console.log(
+                "\n  Setup complete! Restart the gateway: openclaw gateway restart\n",
+              );
+            } else {
+              console.log(
+                "\n  Setup finished but service may need manual start.\n",
+              );
+            }
+          });
+
+        cmd
+          .command("status")
+          .description("Check compression service health")
+          .action(async () => {
+            const health = await checkServiceHealth(cfg.serviceUrl);
+            console.log(JSON.stringify(health, null, 2));
+          });
+
+        cmd
+          .command("uninstall")
+          .description("Remove the Python service and system service")
+          .action(async () => {
+            const logger = {
+              info: (msg: string) => console.log(msg),
+              warn: (msg: string) => console.log(`⚠ ${msg}`),
+              error: (msg: string) => console.error(`✗ ${msg}`),
+            };
+
+            console.log("\n  TokenRanger — Uninstall\n");
+            uninstallService(logger);
+            console.log("\n  Done. Restart the gateway: openclaw gateway restart\n");
+          });
+      },
+      { commands: ["tokenranger"] },
+    );
+
+    // ========================================================================
+    // Service registration
+    // ========================================================================
+
+    api.registerService({
+      id: "tokenranger",
+      start: () => {
+        api.logger.info(
+          `[tokenranger] registered (serviceUrl: ${cfg.serviceUrl})`,
+        );
+      },
+      stop: () => {
+        api.logger.info("[tokenranger] stopped");
+      },
+    });
+  },
+};
+
+export default tokenRangerPlugin;

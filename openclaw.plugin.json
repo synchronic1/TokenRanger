@@ -1,0 +1,75 @@
+{
+  "id": "tokenranger",
+  "name": "TokenRanger",
+  "description": "Compresses session context via a local SLM (Ollama) before sending to cloud LLMs, reducing token costs by 50-80%.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "serviceUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:8100"
+      },
+      "timeoutMs": {
+        "type": "number",
+        "default": 10000
+      },
+      "minPromptLength": {
+        "type": "number",
+        "default": 500
+      },
+      "ollamaUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:11434"
+      },
+      "preferredModel": {
+        "type": "string",
+        "default": "mistral:7b"
+      },
+      "compressionStrategy": {
+        "type": "string",
+        "enum": ["auto", "full", "light", "passthrough"],
+        "default": "auto"
+      },
+      "inferenceMode": {
+        "type": "string",
+        "enum": ["auto", "cpu", "gpu", "remote"],
+        "default": "auto"
+      }
+    }
+  },
+  "uiHints": {
+    "serviceUrl": {
+      "label": "Compression Service URL",
+      "placeholder": "http://127.0.0.1:8100",
+      "help": "URL of the TokenRanger FastAPI service"
+    },
+    "timeoutMs": {
+      "label": "Timeout (ms)",
+      "help": "Max time to wait for compression before falling through",
+      "advanced": true
+    },
+    "minPromptLength": {
+      "label": "Min Prompt Length",
+      "help": "Only compress when session history exceeds this many characters",
+      "advanced": true
+    },
+    "ollamaUrl": {
+      "label": "Ollama URL",
+      "placeholder": "http://127.0.0.1:11434",
+      "advanced": true
+    },
+    "preferredModel": {
+      "label": "Preferred SLM Model",
+      "help": "Ollama model for context compression (e.g. mistral:7b, phi3.5:3b)"
+    },
+    "compressionStrategy": {
+      "label": "Compression Strategy",
+      "help": "auto: GPU detection selects full/light; passthrough: no compression"
+    },
+    "inferenceMode": {
+      "label": "Inference Mode",
+      "help": "auto: probe GPU; cpu: force light; gpu: force full; remote: use remote Ollama"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.js
+*.d.ts
+*.js.map
+!service/*.py
+package-lock.json
+.DS_Store
+._*
+__pycache__/
+*.pyc
+venv/
+.env

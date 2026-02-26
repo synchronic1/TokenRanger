@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenClaw TokenRanger Compression Service
+After=ollama.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.openclaw/services/tokenranger
+ExecStart=%h/.openclaw/services/tokenranger/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8100 --workers 1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
