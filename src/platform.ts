@@ -1,9 +1,13 @@
 /**
  * Cross-platform detection for service management.
+ *
+ * Supported: Linux (systemd), macOS (launchd).
+ * Windows: Use WSL2 — the extension runs as a Linux service inside WSL.
+ * Native Windows is not a target platform.
  */
 
-import os from "node:os";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 export type Platform = {
@@ -37,12 +41,7 @@ export function resolveServiceDir(): string {
 }
 
 export function resolveLaunchdPlistPath(): string {
-  return path.join(
-    os.homedir(),
-    "Library",
-    "LaunchAgents",
-    "com.openclaw.tokenranger.plist",
-  );
+  return path.join(os.homedir(), "Library", "LaunchAgents", "com.openclaw.tokenranger.plist");
 }
 
 export function resolveSystemdUnitDir(): string {

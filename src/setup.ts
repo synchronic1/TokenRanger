@@ -6,16 +6,16 @@
 
 import { execSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
-import path from "node:path";
 import os from "node:os";
+import path from "node:path";
+import type { TokenRangerConfig } from "./config.js";
+import { checkServiceHealth } from "./health.js";
 import {
   detectPlatform,
   resolveServiceDir,
   resolveLaunchdPlistPath,
   resolveSystemdUnitDir,
 } from "./platform.js";
-import { checkServiceHealth } from "./health.js";
-import type { TokenRangerConfig } from "./config.js";
 
 type Logger = {
   info: (msg: string) => void;
@@ -39,6 +39,25 @@ function venvBin(serviceDir: string, name: string): string {
   const subdir = process.platform === "win32" ? "Scripts" : "bin";
   const ext = process.platform === "win32" ? ".exe" : "";
   return path.join(serviceDir, "venv", subdir, `${name}${ext}`);
+}
+
+function parseServiceUrl(serviceUrl: string): { host: string; port: string } {
+  try {
+    const url = new URL(serviceUrl);
+    return { host: url.hostname || "127.0.0.1", port: url.port || "8100" };
+  } catch {
+    return { host: "127.0.0.1", port: "8100" };
+  }
+}
+
+function isLocalOllamaUrl(ollamaUrl: string): boolean {
+  try {
+    const url = new URL(ollamaUrl);
+    const host = url.hostname;
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return true;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -150,17 +169,19 @@ export function installOllama(logger: Logger): boolean {
 // Python service installation
 // ---------------------------------------------------------------------------
 
-export function installPythonService(
-  serviceDir: string,
-  pluginDir: string,
-  logger: Logger,
-): void {
+export function installPythonService(serviceDir: string, pluginDir: string, logger: Logger): void {
   // Create service directory
   fs.mkdirSync(serviceDir, { recursive: true });
 
   // Copy Python files from plugin's service/ directory
   const sourceDir = path.join(pluginDir, "service");
-  const files = ["main.py", "config.py", "inference_router.py", "compressor.py", "requirements.txt"];
+  const files = [
+    "main.py",
+    "config.py",
+    "inference_router.py",
+    "compressor.py",
+    "requirements.txt",
+  ];
 
   for (const file of files) {
     const src = path.join(sourceDir, file);
@@ -231,15 +252,26 @@ export function pullOllamaModel(model: string, ollamaUrl: string, logger: Logger
     return;
   }
 
-  ensureOllamaRunning(logger);
-
   // Resolve model — use default if empty
   const resolvedModel = model || DEFAULT_GPU_MODEL;
 
-  // Check if model already exists
+  // Skip local CLI operations when Ollama is on a remote host
+  if (!isLocalOllamaUrl(ollamaUrl)) {
+    logger.info(`  remote Ollama at ${ollamaUrl} — ensure ${resolvedModel} is pulled there`);
+    return;
+  }
+
+  ensureOllamaRunning(logger);
+
+  // Check if model already exists (match exact model name in first column)
   try {
     const list = execSync("ollama list", { encoding: "utf-8" });
-    if (list.includes(resolvedModel)) {
+    const installed = list
+      .split("\n")
+      .slice(1) // skip header
+      .map((line) => line.split(/\s+/)[0])
+      .filter(Boolean);
+    if (installed.includes(resolvedModel)) {
       logger.info(`  model ${resolvedModel} already present ✓`);
       return;
     }
@@ -273,6 +305,8 @@ export function installLaunchdService(
   const logDir = path.join(os.homedir(), ".openclaw", "logs");
   fs.mkdirSync(logDir, { recursive: true });
 
+  const { host: serviceHost, port: servicePort } = parseServiceUrl(config.serviceUrl);
+
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -284,9 +318,9 @@ export function installLaunchdService(
         <string>${uvicornBin}</string>
         <string>main:app</string>
         <string>--host</string>
-        <string>127.0.0.1</string>
+        <string>${serviceHost}</string>
         <string>--port</string>
-        <string>8100</string>
+        <string>${servicePort}</string>
         <string>--workers</string>
         <string>1</string>
     </array>
@@ -336,6 +370,8 @@ export function installSystemdService(
   const logDir = path.join(os.homedir(), ".openclaw", "logs");
   fs.mkdirSync(logDir, { recursive: true });
 
+  const { host: serviceHost, port: servicePort } = parseServiceUrl(config.serviceUrl);
+
   const unit = `[Unit]
 Description=OpenClaw TokenRanger Compression Service
 After=ollama.service
@@ -343,7 +379,7 @@ After=ollama.service
 [Service]
 Type=simple
 WorkingDirectory=${serviceDir}
-ExecStart=${uvicornBin} main:app --host 127.0.0.1 --port 8100 --workers 1
+ExecStart=${uvicornBin} main:app --host ${serviceHost} --port ${servicePort} --workers 1
 Environment="TOKENRANGER_OLLAMA_BASE_URL=${config.ollamaUrl}"
 Restart=on-failure
 RestartSec=5
@@ -409,10 +445,7 @@ export function uninstallService(logger: Logger): void {
 // Verification
 // ---------------------------------------------------------------------------
 
-export async function verifySetup(
-  serviceUrl: string,
-  logger: Logger,
-): Promise<boolean> {
+export async function verifySetup(serviceUrl: string, logger: Logger): Promise<boolean> {
   // Give the service a moment to start
   await new Promise((resolve) => setTimeout(resolve, 2000));
 

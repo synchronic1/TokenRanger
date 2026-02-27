@@ -35,20 +35,13 @@ export function parseConfig(value: unknown): TokenRangerConfig {
   }
   const raw = value as Record<string, unknown>;
   return {
-    serviceUrl:
-      typeof raw.serviceUrl === "string" ? raw.serviceUrl : DEFAULTS.serviceUrl,
-    timeoutMs:
-      typeof raw.timeoutMs === "number" ? raw.timeoutMs : DEFAULTS.timeoutMs,
+    serviceUrl: typeof raw.serviceUrl === "string" ? raw.serviceUrl : DEFAULTS.serviceUrl,
+    timeoutMs: typeof raw.timeoutMs === "number" ? raw.timeoutMs : DEFAULTS.timeoutMs,
     minPromptLength:
-      typeof raw.minPromptLength === "number"
-        ? raw.minPromptLength
-        : DEFAULTS.minPromptLength,
-    ollamaUrl:
-      typeof raw.ollamaUrl === "string" ? raw.ollamaUrl : DEFAULTS.ollamaUrl,
+      typeof raw.minPromptLength === "number" ? raw.minPromptLength : DEFAULTS.minPromptLength,
+    ollamaUrl: typeof raw.ollamaUrl === "string" ? raw.ollamaUrl : DEFAULTS.ollamaUrl,
     preferredModel:
-      typeof raw.preferredModel === "string"
-        ? raw.preferredModel
-        : DEFAULTS.preferredModel,
+      typeof raw.preferredModel === "string" ? raw.preferredModel : DEFAULTS.preferredModel,
     compressionStrategy:
       typeof raw.compressionStrategy === "string" &&
       VALID_STRATEGIES.includes(raw.compressionStrategy as CompressionStrategy)

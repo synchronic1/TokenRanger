@@ -14,10 +14,11 @@
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { fetchWithSsrFGuard } from "openclaw/plugin-sdk";
+import { compressContext } from "./src/compress-client.js";
 import { parseConfig, tokenRangerConfigSchema } from "./src/config.js";
 import type { TokenRangerConfig } from "./src/config.js";
 import { checkServiceHealth } from "./src/health.js";
-import { compressContext } from "./src/compress-client.js";
 import { detectPlatform, resolveServiceDir } from "./src/platform.js";
 import {
   checkPrerequisites,
@@ -103,13 +104,13 @@ const tokenRangerPlugin = {
           `messages=${event.messages?.length ?? 0}, ` +
           `historyLen=${sessionHistory.length}, ` +
           `minRequired=${cfg.minPromptLength}, ` +
-          `prompt=${(event.prompt ?? "").substring(0, 80)}`
+          `prompt=${(event.prompt ?? "").substring(0, 80)}`,
       );
 
       // Skip if history is too short to benefit from compression
       if (sessionHistory.length < cfg.minPromptLength) {
         api.logger.debug(
-          `[tokenranger] Skipping: history too short (${sessionHistory.length} < ${cfg.minPromptLength})`
+          `[tokenranger] Skipping: history too short (${sessionHistory.length} < ${cfg.minPromptLength})`,
         );
         return;
       }
@@ -122,9 +123,13 @@ const tokenRangerPlugin = {
       } else if (cfg.inferenceMode !== "auto") {
         // inferenceMode maps to strategy
         strategyOverride =
-          cfg.inferenceMode === "cpu"    ? "light" :
-          cfg.inferenceMode === "gpu"    ? "full"  :
-          cfg.inferenceMode === "remote" ? "full"  : undefined;
+          cfg.inferenceMode === "cpu"
+            ? "light"
+            : cfg.inferenceMode === "gpu"
+              ? "full"
+              : cfg.inferenceMode === "remote"
+                ? "full"
+                : undefined;
       }
 
       const modelOverride = cfg.preferredModel || undefined;
@@ -158,9 +163,7 @@ const tokenRangerPlugin = {
         };
       } catch (err) {
         // Graceful degradation: proceed without compression
-        api.logger.warn(
-          `[tokenranger] Compression failed, passing through: ${String(err)}`,
-        );
+        api.logger.warn(`[tokenranger] Compression failed, passing through: ${String(err)}`);
       }
     });
 
@@ -206,7 +209,9 @@ const tokenRangerPlugin = {
             } else if (health.status === "degraded") {
               serviceInfo = "degraded";
             }
-          } catch { /* keep unreachable */ }
+          } catch {
+            /* keep unreachable */
+          }
 
           const mode = cfg.inferenceMode ?? "auto";
           const model = cfg.preferredModel ?? "(default)";
@@ -216,7 +221,9 @@ const tokenRangerPlugin = {
           try {
             const fresh = api.runtime.config.loadConfig();
             enabled = fresh.plugins?.entries?.["tokenranger"]?.enabled !== false;
-          } catch { /* assume enabled */ }
+          } catch {
+            /* assume enabled */
+          }
 
           const text = [
             "TokenRanger Settings",
@@ -237,7 +244,10 @@ const tokenRangerPlugin = {
                       { text: `Model: ${shortModel}`, callback_data: "/tokenranger model" },
                     ],
                     [
-                      { text: enabled ? "Enabled: ON" : "Enabled: OFF", callback_data: "/tokenranger toggle" },
+                      {
+                        text: enabled ? "Enabled: ON" : "Enabled: OFF",
+                        callback_data: "/tokenranger toggle",
+                      },
                     ],
                   ],
                 },
@@ -284,9 +294,7 @@ const tokenRangerPlugin = {
                       { text: "Remote", callback_data: "/tokenranger mode remote" },
                       { text: "Auto", callback_data: "/tokenranger mode auto" },
                     ],
-                    [
-                      { text: "<< Back", callback_data: "/tokenranger" },
-                    ],
+                    [{ text: "<< Back", callback_data: "/tokenranger" }],
                   ],
                 },
               },
@@ -318,10 +326,13 @@ const tokenRangerPlugin = {
           await updatePluginConfig({ inferenceMode: newMode });
 
           const desc =
-            newMode === "cpu"    ? "light strategy, local Ollama" :
-            newMode === "gpu"    ? "full strategy, local GPU Ollama" :
-            newMode === "remote" ? "full strategy, remote Ollama" :
-                                   "auto-detect via Ollama probe";
+            newMode === "cpu"
+              ? "light strategy, local Ollama"
+              : newMode === "gpu"
+                ? "full strategy, local GPU Ollama"
+                : newMode === "remote"
+                  ? "full strategy, remote Ollama"
+                  : "auto-detect via Ollama probe";
 
           api.logger.info(`[tokenranger] inferenceMode set to ${newMode}`);
           return { text: `Inference mode set to: ${newMode} (${desc})` };
@@ -331,20 +342,26 @@ const tokenRangerPlugin = {
         if (args === "model") {
           let models: string[] = [];
           try {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 3000);
-            const res = await fetch(`${cfg.ollamaUrl}/api/tags`, {
-              signal: controller.signal,
+            const { response, release } = await fetchWithSsrFGuard({
+              url: `${cfg.ollamaUrl}/api/tags`,
+              timeoutMs: 3000,
+              policy: { allowPrivateNetwork: true },
+              auditContext: "tokenranger-ollama-tags",
             });
-            clearTimeout(timer);
-            const data = (await res.json()) as { models?: Array<{ name: string }> };
-            models = (data.models ?? []).map((m) => m.name);
+            try {
+              const data = (await response.json()) as { models?: Array<{ name: string }> };
+              models = (data.models ?? []).map((m) => m.name);
+            } finally {
+              await release();
+            }
           } catch {
             return { text: `Could not reach Ollama at ${cfg.ollamaUrl} to list models.` };
           }
 
           if (models.length === 0) {
-            return { text: "No models found in Ollama. Pull a model first: ollama pull mistral:7b" };
+            return {
+              text: "No models found in Ollama. Pull a model first: ollama pull mistral:7b",
+            };
           }
 
           const current = cfg.preferredModel ?? "";
@@ -355,17 +372,11 @@ const tokenRangerPlugin = {
               const row: Array<{ text: string; callback_data: string }> = [];
               for (let j = i; j < Math.min(i + 2, models.length, 8); j++) {
                 const name = models[j];
-                const label = name === current
-                  ? `${name.slice(0, 18)} ✓`
-                  : name.slice(0, 20);
                 const cbData = `/tokenranger model ${name}`;
-                // Telegram 64-byte callback_data limit
-                row.push({
-                  text: label,
-                  callback_data: cbData.length <= 64
-                    ? cbData
-                    : `/tokenranger model ${name.slice(0, 44)}`,
-                });
+                // Skip models that exceed Telegram's 64-byte callback_data limit
+                if (cbData.length > 64) continue;
+                const label = name === current ? `${name.slice(0, 18)} ✓` : name.slice(0, 20);
+                row.push({ text: label, callback_data: cbData });
               }
               buttonRows.push(row);
             }
@@ -378,12 +389,12 @@ const tokenRangerPlugin = {
           }
 
           const list = models
-            .map((m) => m === current ? `  ${m} (current)` : `  ${m}`)
+            .map((m) => (m === current ? `  ${m} (current)` : `  ${m}`))
             .join("\n");
 
           if (isDiscord) {
             const dList = models
-              .map((m) => m === current ? `- \`${m}\` **(current)**` : `- \`${m}\``)
+              .map((m) => (m === current ? `- \`${m}\` **(current)**` : `- \`${m}\``))
               .join("\n");
             return {
               text: `**Available Models** (current: \`${current || "default"}\`)\n\n${dList}\n\nSet with: \`/tokenranger model <name>\``,
@@ -426,7 +437,8 @@ const tokenRangerPlugin = {
 
         // ── fallback ─────────────────────────────────────────────────────
         return {
-          text: "Usage: /tokenranger [mode|model|toggle]\n\n" +
+          text:
+            "Usage: /tokenranger [mode|model|toggle]\n\n" +
             "/tokenranger — show settings\n" +
             "/tokenranger mode — set inference mode (cpu/gpu/remote/auto)\n" +
             "/tokenranger model — select Ollama model\n" +
@@ -447,15 +459,10 @@ const tokenRangerPlugin = {
 
         cmd
           .command("setup")
-          .description(
-            "Install the Python compression service and Ollama models",
-          )
+          .description("Install the Python compression service and Ollama models")
           .option("--skip-ollama", "Skip Ollama model pull")
           .option("--skip-service", "Skip system service creation")
-          .option(
-            "--venv-path <path>",
-            "Custom installation directory",
-          )
+          .option("--venv-path <path>", "Custom installation directory")
           .action(async (opts: Record<string, unknown>) => {
             const logger = {
               info: (msg: string) => console.log(msg),
@@ -474,21 +481,16 @@ const tokenRangerPlugin = {
             }
 
             const platform = detectPlatform();
-            console.log(
-              `\n  Platform: ${platform.os} (${platform.serviceManager})`,
-            );
+            console.log(`\n  Platform: ${platform.os} (${platform.serviceManager})`);
 
             const serviceDir =
-              typeof opts.venvPath === "string"
-                ? opts.venvPath
-                : resolveServiceDir();
+              typeof opts.venvPath === "string" ? opts.venvPath : resolveServiceDir();
             // Resolve the plugin directory (where service/ files live)
             // When loaded as ./index.ts, dirname is already the plugin root.
             // When loaded as dist/index.js, we need to go up one level.
             const thisDir = path.dirname(fileURLToPath(import.meta.url));
-            const pluginDir = path.basename(thisDir) === "dist"
-              ? path.resolve(thisDir, "..")
-              : thisDir;
+            const pluginDir =
+              path.basename(thisDir) === "dist" ? path.resolve(thisDir, "..") : thisDir;
 
             console.log(`  Install directory: ${serviceDir}\n`);
 
@@ -520,9 +522,7 @@ const tokenRangerPlugin = {
               } else if (platform.serviceManager === "systemd") {
                 installSystemdService(serviceDir, pluginDir, cfg, logger);
               } else {
-                logger.warn(
-                  "  No supported service manager. Start manually:",
-                );
+                logger.warn("  No supported service manager. Start manually:");
                 logger.info(
                   `  cd ${serviceDir} && venv/bin/uvicorn main:app --host 127.0.0.1 --port 8100`,
                 );
@@ -535,13 +535,9 @@ const tokenRangerPlugin = {
             console.log("\n  Step 5/5: Verifying...");
             const ok = await verifySetup(cfg.serviceUrl, logger);
             if (ok) {
-              console.log(
-                "\n  Setup complete! Restart the gateway: openclaw gateway restart\n",
-              );
+              console.log("\n  Setup complete! Restart the gateway: openclaw gateway restart\n");
             } else {
-              console.log(
-                "\n  Setup finished but service may need manual start.\n",
-              );
+              console.log("\n  Setup finished but service may need manual start.\n");
             }
           });
 
@@ -578,9 +574,7 @@ const tokenRangerPlugin = {
     api.registerService({
       id: "tokenranger",
       start: () => {
-        api.logger.info(
-          `[tokenranger] registered (serviceUrl: ${cfg.serviceUrl})`,
-        );
+        api.logger.info(`[tokenranger] registered (serviceUrl: ${cfg.serviceUrl})`);
       },
       stop: () => {
         api.logger.info("[tokenranger] stopped");

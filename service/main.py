@@ -93,6 +93,8 @@ async def health():
     profile = await router.probe()
     if profile.compute_class.value == "unavailable":
         status = "degraded"
+    elif profile.compression_strategy == "passthrough":
+        status = "degraded"
     else:
         status = "ok"
     return {
