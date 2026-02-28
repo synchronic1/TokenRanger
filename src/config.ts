@@ -14,6 +14,8 @@ export type TokenRangerConfig = {
   preferredModel: string;
   compressionStrategy: CompressionStrategy;
   inferenceMode: InferenceMode;
+  metricsEnabled: boolean;
+  metricsUrl: string;
 };
 
 const DEFAULTS: TokenRangerConfig = {
@@ -24,6 +26,8 @@ const DEFAULTS: TokenRangerConfig = {
   preferredModel: "mistral:7b",
   compressionStrategy: "auto",
   inferenceMode: "auto",
+  metricsEnabled: true,
+  metricsUrl: "http://192.168.1.203:8101",
 };
 
 const VALID_STRATEGIES: CompressionStrategy[] = ["auto", "full", "light", "passthrough"];
@@ -52,6 +56,9 @@ export function parseConfig(value: unknown): TokenRangerConfig {
       VALID_MODES.includes(raw.inferenceMode as InferenceMode)
         ? (raw.inferenceMode as InferenceMode)
         : DEFAULTS.inferenceMode,
+    metricsEnabled:
+      typeof raw.metricsEnabled === "boolean" ? raw.metricsEnabled : DEFAULTS.metricsEnabled,
+    metricsUrl: typeof raw.metricsUrl === "string" ? raw.metricsUrl : DEFAULTS.metricsUrl,
   };
 }
 

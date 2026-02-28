@@ -12,6 +12,7 @@
  * Install: openclaw tokenranger setup
  */
 
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetchWithSsrFGuard, type OpenClawPluginApi } from "openclaw/plugin-sdk";
@@ -41,6 +42,21 @@ const tokenRangerPlugin = {
   register(api: OpenClawPluginApi) {
     // Mutable cfg — updated in-memory by /tokenranger command, takes effect immediately
     let cfg: TokenRangerConfig = parseConfig(api.pluginConfig);
+    const nodeHostname = os.hostname();
+
+    /** Fire-and-forget metrics emit to centralized collector. Never blocks. */
+    function emitMetrics(event: Record<string, unknown>): void {
+      if (!cfg.metricsEnabled) return;
+      try {
+        fetch(`${cfg.metricsUrl}/emit`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ node: nodeHostname, ...event }),
+        }).catch(() => {});
+      } catch {
+        // Never throw from metrics emit
+      }
+    }
 
     // ========================================================================
     // Health check on gateway start
@@ -111,13 +127,22 @@ const tokenRangerPlugin = {
         api.logger.debug?.(
           `[tokenranger] Skipping turn 1: sending initial prompt directly to API (${userTurnCount} user turn(s))`,
         );
+        emitMetrics({
+          user_turn: userTurnCount,
+          skipped: true,
+          skip_reason: "turn_1",
+        });
         return;
       }
 
       // Strip code blocks (``` ... ```) from session history before compression.
       // Code blocks must be preserved verbatim to maintain syntax/lint/convention;
       // the SLM compressor can mangle indentation, quotes, and structure.
-      const historyForCompression = sessionHistory.replace(/```[\s\S]*?```/g, "");
+      const codeBlockMatches = sessionHistory.match(/```[\s\S]*?```/g);
+      const codeBlockCount = codeBlockMatches ? codeBlockMatches.length : 0;
+      const historyForCompression = codeBlockMatches
+        ? sessionHistory.replace(/```[\s\S]*?```/g, "")
+        : sessionHistory;
 
       // Debug: log hook invocation details
       api.logger.debug?.(
@@ -135,6 +160,12 @@ const tokenRangerPlugin = {
         api.logger.debug?.(
           `[tokenranger] Skipping: history too short after code strip (${historyForCompression.length} < ${cfg.minPromptLength})`,
         );
+        emitMetrics({
+          user_turn: userTurnCount,
+          original_chars: historyForCompression.length,
+          skipped: true,
+          skip_reason: "trivial_input",
+        });
         return;
       }
 
@@ -175,6 +206,19 @@ const tokenRangerPlugin = {
           `[tokenranger] Compressed: ${result.originalChars} → ${result.compressedChars} chars ` +
             `(${result.reductionPct}% reduction, ${result.latencyMs}ms, ${result.computeClass})`,
         );
+
+        emitMetrics({
+          user_turn: userTurnCount,
+          original_chars: result.originalChars,
+          compressed_chars: result.compressedChars,
+          char_reduction_pct: result.reductionPct,
+          compute_class: result.computeClass,
+          model_used: result.modelUsed,
+          strategy: strategyOverride ?? "auto",
+          latency_ms: result.latencyMs,
+          code_blocks_stripped: codeBlockCount,
+          skipped: false,
+        });
 
         // Note: prependContext is the only context-injection mechanism available
         // in the before_agent_start hook (same pattern as memory-lancedb).
