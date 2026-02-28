@@ -1,0 +1,19 @@
+[Unit]
+Description=TokenRanger Metrics Collector
+Documentation=https://github.com/synchronic1/TokenRanger
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tokenranger-metrics
+ExecStart=/opt/tokenranger-metrics/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8101
+Restart=always
+RestartSec=5
+
+Environment="TRMX_DB_PATH=/opt/tokenranger-metrics/metrics.db"
+Environment="TRMX_NODES=pvet630:192.168.1.242,r430a:192.168.1.240"
+Environment="TRMX_RETENTION_DAYS=30"
+Environment="TRMX_POLL_INTERVAL_SECONDS=300"
+
+[Install]
+WantedBy=multi-user.target

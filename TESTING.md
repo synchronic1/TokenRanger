@@ -266,7 +266,87 @@ Environment="TOKENRANGER_OLLAMA_TIMEOUT=10.0"
 
 ---
 
-## 10. Setup CLI Verification
+## 10. Discord Interactive Components — Test Protocol & Results (2026-02-26)
+
+### Deployment
+
+| Target | IP | OpenClaw Dist | TokenRanger Dist | Gateway Restart |
+|--------|-----|--------------|-----------------|----------------|
+| pvet630 | 192.168.1.242 | Deployed (782 files via tar+ssh) | Deployed (scp) | Yes, clean startup |
+| r430a | 192.168.1.240 | Pending (SSH unreachable) | Deployed (scp, prior session) | Pending |
+
+**New files deployed:**
+- `plugin-command-picker.ts` → bundled into OpenClaw dist chunks (confirmed `plgcmd` in 4 chunk files)
+- Modified `native-command.ts`, `provider.ts`, `monitor.ts` → plugin command handlers + fallback components
+- Modified `index.ts` → Discord `channelData.discord` specs for interactive components
+
+### Pre-Test Verification (Programmatic — pvet630)
+
+| Check | Status | Details |
+|-------|--------|---------|
+| Gateway startup | PASS | Zero errors in journalctl, clean restart |
+| Plugin load | PASS | `[tokenranger] registered (serviceUrl: http://127.0.0.1:8100)` |
+| Service health | PASS | `gpu_full`, `mistral:7b-instruct`, strategy `full` |
+| Discord login | PASS | `logged in to discord as 1467804096978354238` (@ClawBaby) |
+| Plugin manifest | PASS | configSchema 7 properties, uiHints loaded |
+| Compression test | PASS | 486→737 chars, gpu_full, 3.6s latency |
+| Bundle integrity | PASS | `plgcmd` custom ID key found in 4 dist chunk files |
+
+### 5-Turn Interactive Test Protocol
+
+Discord slash commands and component interactions require the Discord client.
+
+**Turn 1: Main Menu** — `/tokenranger` (no args)
+- Expected: Ephemeral Container with title "TokenRanger Settings", detail lines (service/mode/model/enabled), button row (Mode/Model/Enable)
+- Pass: [ ] Ephemeral | [ ] Container layout | [ ] Mode: auto | [ ] Model: mistral:7b | [ ] Enabled: ON (green)
+
+**Turn 2: Mode Picker** — Click "Mode: auto" button
+- Expected: Container updates in-place to "Inference Mode" with CPU/GPU/Remote/Auto buttons, current highlighted primary
+- Pass: [ ] In-place update | [ ] Auto=primary | [ ] Others=secondary | [ ] Back button
+
+**Turn 3: Set Mode** — Click "GPU" button
+- Expected: Returns to main menu, Mode button now "Mode: gpu", config persisted
+- Pass: [ ] Main menu | [ ] Mode: gpu | [ ] Config updated in openclaw.json
+
+**Turn 4: Model Picker** — Click "Model: mistral:7b" button
+- Expected: Select dropdown with Ollama models, current marked default, Back button
+- Pass: [ ] Select dropdown | [ ] Models listed | [ ] Current=default | [ ] Back button
+
+**Turn 5: Toggle** — Click "Enabled: ON" button
+- Expected: Returns to main menu, button shows "Enabled: OFF" (red/danger), config persisted
+- Pass: [ ] Main menu | [ ] Enabled: OFF (red) | [ ] Config persisted | [ ] Re-toggle works
+
+### Post-Test Verification Commands
+
+```bash
+# Check config was updated
+ssh -i ~/.ssh/id_ed25519_cluster rm@192.168.1.242 \
+  "cat ~/.openclaw/openclaw.json | python3 -c 'import sys,json; c=json.load(sys.stdin); print(json.dumps(c[\"plugins\"][\"entries\"][\"tokenranger\"],indent=2))'"
+
+# Check gateway logs for interaction handling
+ssh -i ~/.ssh/id_ed25519_cluster rm@192.168.1.242 \
+  "journalctl --user -u openclaw-gateway.service --since '10 minutes ago' --no-pager | grep -i 'tokenranger\|plgcmd'"
+
+# Verify Telegram still works (inline keyboard, not components)
+# Send /tokenranger via Telegram, confirm button layout unchanged
+```
+
+### r430a Deployment (Pending — SSH Unreachable)
+
+r430a (192.168.1.240) SSH timed out during deployment. Once connectivity is restored:
+
+```bash
+cd /path/to/openclaw && tar czf - dist/ | ssh vm404 "cd /home/rm/.npm-global/lib/node_modules/openclaw/ && rm -rf dist && tar xzf -"
+ssh vm404 "openclaw gateway restart"
+ssh vm404 "openclaw tokenranger status"
+# Repeat 5-turn test protocol
+```
+
+r430a differences: CPU-only, remote GPU via `http://192.168.1.242:11434`, expected light strategy unless remote GPU is reachable.
+
+---
+
+## 11. Setup CLI Verification
 
 ```bash
 $ openclaw tokenranger setup
