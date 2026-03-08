@@ -23,10 +23,10 @@ const DEFAULTS: TokenRangerConfig = {
   timeoutMs: 10_000,
   minPromptLength: 500,
   ollamaUrl: "http://127.0.0.1:11434",
-  preferredModel: "mistral:7b",
+  preferredModel: "qwen3:8b",
   compressionStrategy: "auto",
   inferenceMode: "auto",
-  metricsEnabled: true,
+  metricsEnabled: false,
   metricsUrl: "http://192.168.1.203:8101",
 };
 

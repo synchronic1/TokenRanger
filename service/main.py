@@ -22,6 +22,13 @@ router = InferenceRouter(settings)
 compressor = ContextCompressor(router)
 
 
+class TurnMeta(BaseModel):
+    n: int
+    role: str  # "user" | "asst"
+    chars: int = 0
+    has_code: bool = False
+
+
 class CompressRequest(BaseModel):
     prompt: str
     session_history: str = ""
@@ -29,6 +36,7 @@ class CompressRequest(BaseModel):
     max_tokens: int = 2000
     model_override: Optional[str] = None
     strategy_override: Optional[str] = None
+    turn_meta: list[TurnMeta] = []
 
 
 class CompressResponse(BaseModel):
@@ -45,29 +53,16 @@ class CompressResponse(BaseModel):
 async def compress(req: CompressRequest):
     start = time.monotonic()
 
-    # Fast-path: return passthrough for empty/trivial input
-    total_input = len(req.session_history.strip()) + len(req.lance_results.strip())
-    if total_input < 50:
-        logger.debug("compress: trivial input (%d chars), returning passthrough", total_input)
-        passthrough = compressor._passthrough(req.session_history, req.lance_results)
-        return CompressResponse(
-            compressed_context=passthrough,
-            compute_class="passthrough",
-            model_used="none",
-            original_chars=total_input,
-            compressed_chars=len(passthrough),
-            reduction_pct=0.0,
-            latency_ms=0.0,
-        )
-
+    turn_meta = [t.model_dump() for t in req.turn_meta] if req.turn_meta else []
     result, profile = await compressor.compress(
         req.session_history, req.lance_results, req.prompt,
         model_override=req.model_override,
         strategy_override=req.strategy_override,
+        turn_meta=turn_meta,
     )
 
     elapsed_ms = (time.monotonic() - start) * 1000
-    original = len(req.session_history) + len(req.lance_results)
+    original = len(req.session_history.strip()) + len(req.lance_results.strip())
     compressed = len(result)
     reduction = ((original - compressed) / max(original, 1)) * 100
 

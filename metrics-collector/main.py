@@ -26,8 +26,9 @@ logger = logging.getLogger("tokenranger-metrics")
 cfg = MetricsConfig()
 store = MetricsStore(db_path=cfg.db_path, token_ratio=cfg.token_estimate_ratio)
 
-# Register tracked nodes
-for node_cfg in cfg.parse_nodes():
+# Parse nodes once, reuse for registration and poller
+_nodes = cfg.parse_nodes()
+for node_cfg in _nodes:
     store.register_node(
         node_cfg.node_id,
         node_cfg.ip,
@@ -44,7 +45,7 @@ for node_cfg in cfg.parse_nodes():
 async def lifespan(app: FastAPI):
     poller = UsagePoller(
         store=store,
-        nodes=cfg.parse_nodes(),
+        nodes=_nodes,
         interval=cfg.poll_interval_seconds,
     )
     pruner = PruneScheduler(

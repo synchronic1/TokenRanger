@@ -19,7 +19,7 @@ cluster running OpenClaw as a 24/7 personal AI assistant across Discord and Tele
 
 ### Software Stack
 - **OpenClaw**: v2026.2.23+, systemd user services on both nodes
-- **Ollama**: 0.15.6, hosting mistral:7b-instruct (GPU) and phi3.5:latest (CPU fallback)
+- **Ollama**: 0.15.6, hosting qwen3:1.7b/qwen3:8b (current) — migrated from mistral:7b-instruct + phi3.5
 - **Python**: 3.10.12, isolated venv at `~/.openclaw/services/tokenranger/`
 - **Node.js**: v22+, TypeScript plugin compiled to ESM
 
@@ -35,8 +35,8 @@ Both physical hosts have Intel Turbo Boost enabled for maximum single-thread per
 
 | Node | IP | Hardware | Ollama | Strategy |
 |------|------|----------|--------|----------|
-| pvet630 | 192.168.1.242 | 3x NVIDIA GPUs (RTX 3090 24GB + 2x RTX 3060 12GB) | local, 11434 | full (mistral:7b-instruct) |
-| r430a | 192.168.1.240 | KVM VM, Xeon E5-2680 v4, 8 vCPUs, 16GB RAM, no GPU | remote → pvet630:11434 | full (mistral:7b-instruct) |
+| pvet630 | 192.168.1.242 | 3x NVIDIA GPUs (RTX 3090 24GB + 2x RTX 3060 12GB) | local, 11434 | full (qwen3:8b) |
+| r430a | 192.168.1.240 | KVM VM, Xeon E5-2680 v4, 8 vCPUs, 16GB RAM, no GPU | remote → pvet630:11434 | full (qwen3:8b) |
 
 ---
 
@@ -68,7 +68,49 @@ $ curl -s http://127.0.0.1:8100/health | python3 -m json.tool
 
 ---
 
-## 2. Compression Benchmark — 5-Turn Simulated Conversation
+## 2. Model Comparison Benchmark (2026-03-08)
+
+Comparative benchmark across 7 SLM candidates on pvet630 (GPU). Three structured turn-tagged
+payloads: SHORT (749 chars, 3 turns), MEDIUM (1959 chars, 5 turns), LONG (4206 chars, 8 turns).
+Qwen3 models tested with `/no_think` system prompt prefix to disable hidden thinking tokens.
+
+### Results
+
+| Model | SHORT (749c) | MEDIUM (1959c) | LONG (4206c) | Tok/s | 1st-person violations |
+|-------|:---:|:---:|:---:|:---:|:---:|
+| **qwen3:1.7b** | **54.3%** | **62.1%** | **89.8%** | **287-300** | **0** |
+| qwen2.5:7b | 78.1% | 85.9% | 82.4% | 147-152 | 0 |
+| qwen3:4b | 3.3% | 15.7% | 19.4% | 157-167 | 1 |
+| qwen3:8b | -68.4% | -0.4% | 44.4% | 115-120 | 1 |
+| mistral:7b-instruct | 6.7% | 24.0% | 37.2% | 143-149 | 0 |
+| llama3.1:8b | 28.3% | 41.4% | 38.4% | 63-65 | 0 |
+| llama3.2:3b | 51.0% | 28.9% | 47.2% | 124-132 | 0 |
+
+### Key Findings
+
+1. **qwen3:1.7b is the best compression model** — highest reduction on long contexts (89.8%),
+   fastest throughput (~300 tok/s on GPU), and zero first-person voice leakage
+2. **Larger models are worse at compression** — qwen3:4b and qwen3:8b are too conservative,
+   echoing input rather than summarizing. qwen3:8b produces *expansion* on short input (-68.4%)
+3. **qwen3:4b ignores `/no_think`** — generated 3280 hidden thinking tokens for 724 chars of
+   visible output on SHORT. The directive is not respected by this model size
+4. **qwen2.5:7b has strong raw reduction** but at half the throughput of qwen3:1.7b
+5. **mistral:7b-instruct underperforms** — only 6.7-37% reduction, previously the default model
+6. **`/no_think` is essential for Qwen3** — without it, qwen3:1.7b generates ~2000 hidden thinking
+   tokens per response, adding 3-5s latency with no benefit to compression quality
+
+### Recommendation
+
+- **Default model (all strategies)**: `qwen3:1.7b` with `/no_think` system prompt prefix
+- **GPU full strategy**: `qwen3:1.7b` (not 8b — smaller model compresses better)
+- **CPU light strategy**: `qwen3:1.7b` (1.1GB, fits comfortably in RAM)
+
+Config updated across `service/config.py`, `src/config.ts`, `src/setup.ts`, `openclaw.plugin.json`.
+Compressor prompts updated with `_no_think_prefix()` helper in `service/compressor.py`.
+
+---
+
+## 3. Compression Benchmark — 5-Turn Simulated Conversation (Legacy: mistral:7b)
 
 A scripted 5-turn Discord bot setup conversation was used to benchmark both nodes.
 Each turn builds on the previous compressed output, simulating real session accumulation.
@@ -103,9 +145,9 @@ input. This is expected — real conversations with 500+ char history show 60-85
 
 ---
 
-## 3. Live Production Verification — Real Discord Conversations
+## 4. Live Production Verification — Real Discord Conversations
 
-### 3a. Post-Code-Review Benchmark (GPU-full, mistral:7b-instruct)
+### 4a. Post-Code-Review Benchmark (GPU-full, mistral:7b-instruct)
 
 Run against actual multi-turn Discord conversations after deploying code review fixes:
 
@@ -119,13 +161,13 @@ Run against actual multi-turn Discord conversations after deploying code review 
 
 **Cumulative**: 5,866 → 885 tokens (**84.9% reduction**), 1.6s avg/turn
 
-### 3b. Live Discord Session
+### 4b. Live Discord Session
 
 A real Discord conversation compressed 25,146 chars → 578 chars (**97.7% reduction**).
 
 ---
 
-## 4. Content Extraction Bug — Discovery and Verification
+## 5. Content Extraction Bug — Discovery and Verification
 
 ### Problem
 After initial deployment, the `before_agent_start` hook fired on every message but
@@ -163,7 +205,7 @@ if (typeof m.content === "string") {
 
 ---
 
-## 5. Empty-Input Hallucination Guard — Discovery and Verification
+## 6. Empty-Input Hallucination Guard — Discovery and Verification
 
 ### Problem
 When `session_history` was empty (first message in a conversation), the Ollama model
@@ -189,9 +231,9 @@ if total_input < 50:
 
 ---
 
-## 6. Graceful Degradation Verification
+## 7. Graceful Degradation Verification
 
-### 6a. Python Service Down
+### 7a. Python Service Down
 ```bash
 systemctl --user stop openclaw-tokenranger.service
 # Send message via Discord → gateway continues normally
@@ -200,7 +242,7 @@ systemctl --user start openclaw-tokenranger.service
 ```
 **Result**: Full context sent to cloud LLM. No user-visible error.
 
-### 6b. Ollama Unreachable
+### 7b. Ollama Unreachable
 ```bash
 systemctl stop ollama
 curl -s http://127.0.0.1:8100/health
@@ -210,7 +252,7 @@ systemctl start ollama
 ```
 **Result**: Service returns passthrough strategy. No crash, no error to user.
 
-### 6c. Timeout
+### 7c. Timeout
 Configured `timeoutMs: 2000` (artificially low). Sent large conversation:
 - AbortController triggered after 2s
 - Gateway log: `[tokenranger] Compression failed, passing through`
@@ -218,7 +260,7 @@ Configured `timeoutMs: 2000` (artificially low). Sent large conversation:
 
 ---
 
-## 7. Remote GPU Offload Verification (r430a → pvet630)
+## 8. Remote GPU Offload Verification (r430a → pvet630)
 
 ### Configuration
 ```ini
@@ -240,7 +282,7 @@ Environment="TOKENRANGER_OLLAMA_TIMEOUT=10.0"
 
 ---
 
-## 8. CPU vs GPU Strategy Comparison
+## 9. CPU vs GPU Strategy Comparison
 
 | Metric | GPU (pvet630) | CPU (r430a, before offload) |
 |--------|--------------|---------------------------|
@@ -252,7 +294,7 @@ Environment="TOKENRANGER_OLLAMA_TIMEOUT=10.0"
 
 ---
 
-## 9. `/tokenranger` Slash Command Verification
+## 10. `/tokenranger` Slash Command Verification
 
 | Command | Tested On | Result |
 |---------|-----------|--------|
@@ -266,7 +308,7 @@ Environment="TOKENRANGER_OLLAMA_TIMEOUT=10.0"
 
 ---
 
-## 10. Discord Interactive Components — Test Protocol & Results (2026-02-26)
+## 11. Discord Interactive Components — Test Protocol & Results (2026-02-26)
 
 ### Deployment
 
@@ -346,7 +388,7 @@ r430a differences: CPU-only, remote GPU via `http://192.168.1.242:11434`, expect
 
 ---
 
-## 11. Setup CLI Verification
+## 12. Setup CLI Verification
 
 ```bash
 $ openclaw tokenranger setup

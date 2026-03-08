@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class MetricsConfig(BaseSettings):
@@ -21,8 +21,7 @@ class MetricsConfig(BaseSettings):
     # Tracked nodes: "name:ip,name:ip"
     nodes: str = "pvet630:192.168.1.242,r430a:192.168.1.240"
 
-    class Config:
-        env_prefix = "TRMX_"
+    model_config = SettingsConfigDict(env_prefix="TRMX_")
 
     def parse_nodes(self) -> list[NodeConfig]:
         result = []

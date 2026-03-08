@@ -7,6 +7,13 @@ import { fetchWithSsrFGuard } from "openclaw/plugin-sdk";
 /** SSRF policy: TokenRanger calls local/LAN services only (admin-configured). */
 const LOCAL_POLICY = { allowPrivateNetwork: true } as const;
 
+export type TurnMeta = {
+  n: number;
+  role: "user" | "asst";
+  chars: number;
+  hasCode: boolean;
+};
+
 export type CompressRequest = {
   prompt: string;
   sessionHistory: string;
@@ -14,6 +21,7 @@ export type CompressRequest = {
   timeoutMs: number;
   modelOverride?: string;
   strategyOverride?: string;
+  turnMeta?: TurnMeta[];
 };
 
 export type CompressResult = {
@@ -36,9 +44,11 @@ export async function compressContext(req: CompressRequest): Promise<CompressRes
         body: JSON.stringify({
           prompt: req.prompt,
           session_history: req.sessionHistory,
-          lance_results: "",
           ...(req.modelOverride ? { model_override: req.modelOverride } : {}),
           ...(req.strategyOverride ? { strategy_override: req.strategyOverride } : {}),
+          ...(req.turnMeta?.length ? { turn_meta: req.turnMeta.map((t) => ({
+            n: t.n, role: t.role, chars: t.chars, has_code: t.hasCode,
+          })) } : {}),
         }),
       },
       timeoutMs: req.timeoutMs,

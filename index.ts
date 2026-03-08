@@ -88,16 +88,27 @@ const tokenRangerPlugin = {
     // Core hook: compress context before agent start
     // ========================================================================
 
-    api.on("before_agent_start", async (event) => {
-      // Build session history from messages
-      let sessionHistory = "";
+    api.on("before_agent_start", async (event, ctx) => {
+      // ── Build structured turn list from messages ──────────────────────
+      type TurnMeta = {
+        n: number;
+        role: "user" | "asst";
+        chars: number;
+        hasCode: boolean;
+      };
+      const turns: TurnMeta[] = [];
+      const taggedParts: string[] = [];
       let userTurnCount = 0;
+      let turnIndex = 0;
+      let totalCodeBlocks = 0;
+
       if (event.messages && Array.isArray(event.messages)) {
-        const parts: string[] = [];
         for (const msg of event.messages) {
           if (!msg || typeof msg !== "object") continue;
           const m = msg as Record<string, unknown>;
           const role = m.role as string;
+          if (role !== "user" && role !== "assistant") continue;
+
           // Handle both string content and array content blocks
           let content = "";
           if (typeof m.content === "string") {
@@ -109,14 +120,35 @@ const tokenRangerPlugin = {
               .map((c) => (c.text as string) ?? "")
               .join(" ");
           }
-          if (role === "user") {
-            userTurnCount++;
+          if (!content) continue;
+
+          if (role === "user") userTurnCount++;
+          turnIndex++;
+
+          const hasCode = /```[\s\S]*?```/.test(content);
+          const meta: TurnMeta = {
+            n: turnIndex,
+            role: role === "assistant" ? "asst" : "user",
+            chars: content.length,
+            hasCode,
+          };
+          turns.push(meta);
+
+          // Strip code blocks — count them but remove before compression
+          const codeMatches = content.match(/```[\s\S]*?```/g);
+          if (codeMatches) {
+            totalCodeBlocks += codeMatches.length;
+            content = content.replace(/```[\s\S]*?```/g, "");
           }
-          if (content && (role === "user" || role === "assistant")) {
-            parts.push(`${role}: ${content}`);
-          }
+
+          // Format size: "520c" or "1.2k"
+          const sizeLabel =
+            meta.chars >= 1000
+              ? `${(meta.chars / 1000).toFixed(1)}k`
+              : `${meta.chars}c`;
+          const flags = meta.hasCode ? "|code" : "";
+          taggedParts.push(`[T${meta.n}:${meta.role}|${sizeLabel}${flags}] ${content.trim()}`);
         }
-        sessionHistory = parts.join("\n\n");
       }
 
       // Skip turn 1: let the initial prompt go directly to the API without
@@ -135,34 +167,28 @@ const tokenRangerPlugin = {
         return;
       }
 
-      // Strip code blocks (``` ... ```) from session history before compression.
-      // Code blocks must be preserved verbatim to maintain syntax/lint/convention;
-      // the SLM compressor can mangle indentation, quotes, and structure.
-      const codeBlockMatches = sessionHistory.match(/```[\s\S]*?```/g);
-      const codeBlockCount = codeBlockMatches ? codeBlockMatches.length : 0;
-      const historyForCompression = codeBlockMatches
-        ? sessionHistory.replace(/```[\s\S]*?```/g, "")
-        : sessionHistory;
+      const taggedHistory = taggedParts.join("\n\n");
 
       // Debug: log hook invocation details
       api.logger.debug?.(
         `[tokenranger] before_agent_start: ` +
           `messages=${event.messages?.length ?? 0}, ` +
           `userTurns=${userTurnCount}, ` +
-          `historyLen=${sessionHistory.length}, ` +
-          `afterCodeStrip=${historyForCompression.length}, ` +
+          `turns=${turns.length}, ` +
+          `taggedLen=${taggedHistory.length}, ` +
+          `codeBlocks=${totalCodeBlocks}, ` +
           `minRequired=${cfg.minPromptLength}, ` +
-          `prompt=${(event.prompt ?? "").substring(0, 80)}`,
+          `sessionId=${ctx?.sessionId ?? "none"}`,
       );
 
       // Skip if history (after code block removal) is too short to benefit
-      if (historyForCompression.length < cfg.minPromptLength) {
+      if (taggedHistory.length < cfg.minPromptLength) {
         api.logger.debug?.(
-          `[tokenranger] Skipping: history too short after code strip (${historyForCompression.length} < ${cfg.minPromptLength})`,
+          `[tokenranger] Skipping: history too short after code strip (${taggedHistory.length} < ${cfg.minPromptLength})`,
         );
         emitMetrics({
           user_turn: userTurnCount,
-          original_chars: historyForCompression.length,
+          original_chars: taggedHistory.length,
           skipped: true,
           skip_reason: "trivial_input",
         });
@@ -186,19 +212,35 @@ const tokenRangerPlugin = {
                 : undefined;
       }
 
-      const modelOverride = cfg.preferredModel || undefined;
+      const modelOverride = cfg.preferredModel ? cfg.preferredModel : undefined;
 
       try {
         const result = await compressContext({
           prompt: event.prompt ?? "",
-          sessionHistory: historyForCompression,
+          sessionHistory: taggedHistory,
           serviceUrl: cfg.serviceUrl,
           timeoutMs: cfg.timeoutMs,
           strategyOverride,
           modelOverride,
+          turnMeta: turns,
         });
 
-        if (!result || result.reductionPct < 5) {
+        if (!result) {
+          api.logger.debug?.("[tokenranger] compressContext returned null (service error or timeout)");
+          return;
+        }
+        if (result.reductionPct < 5) {
+          api.logger.debug?.(
+            `[tokenranger] Skipping: reduction too low (${result.reductionPct}%)`,
+          );
+          emitMetrics({
+            user_turn: userTurnCount,
+            original_chars: result.originalChars,
+            compressed_chars: result.compressedChars,
+            char_reduction_pct: result.reductionPct,
+            skipped: true,
+            skip_reason: "low_reduction",
+          });
           return;
         }
 
@@ -208,6 +250,7 @@ const tokenRangerPlugin = {
         );
 
         emitMetrics({
+          session_id: ctx?.sessionId,
           user_turn: userTurnCount,
           original_chars: result.originalChars,
           compressed_chars: result.compressedChars,
@@ -216,7 +259,7 @@ const tokenRangerPlugin = {
           model_used: result.modelUsed,
           strategy: strategyOverride ?? "auto",
           latency_ms: result.latencyMs,
-          code_blocks_stripped: codeBlockCount,
+          code_blocks_stripped: totalCodeBlocks,
           skipped: false,
         });
 
@@ -510,7 +553,7 @@ const tokenRangerPlugin = {
 
           if (models.length === 0) {
             return {
-              text: "No models found in Ollama. Pull a model first: ollama pull mistral:7b",
+              text: "No models found in Ollama. Pull a model first: ollama pull qwen3:8b",
             };
           }
 
@@ -578,6 +621,9 @@ const tokenRangerPlugin = {
         const modelMatch = args.match(/^model (.+)$/);
         if (modelMatch) {
           const newModel = modelMatch[1].trim();
+          if (!/^[\w.\-/:]+$/.test(newModel)) {
+            return { text: `Invalid model name: ${newModel}` };
+          }
           await updatePluginConfig({ preferredModel: newModel });
           api.logger.info(`[tokenranger] preferredModel set to ${newModel}`);
 

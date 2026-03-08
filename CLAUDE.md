@@ -35,9 +35,11 @@ npm install && npm run build    # outputs to dist/
 # Clean build artifacts
 npm run clean
 
-# No unit test suite — testing is done live against OpenClaw deployments
+# No unit test suite or linter — testing is done live against OpenClaw deployments
 # See TESTING.md for verification procedures
 ```
+
+TypeScript: strict mode, ES2022 target, Node16 module resolution. No runtime npm dependencies — only `@types/node` and `typescript` as devDeps. Python service files are copied as-is (no build step).
 
 ## Deployment
 
@@ -71,6 +73,17 @@ Deployed paths: `~/.openclaw/extensions/tokenranger/` (built JS), `~/.openclaw/s
 
 Remote GPU config for r430a: `TOKENRANGER_OLLAMA_BASE_URL=http://192.168.1.242:11434`
 
+## Metrics Collector (`metrics-collector/`)
+
+Centralized FastAPI service on CT 203 (port 8101, `TRMX_` env prefix) that aggregates compression events from all nodes.
+
+- `main.py` — Endpoints: `POST /emit`, `GET /summary`, `/events`, `/export`, `/compare`, `/metrics`
+- `metrics_store.py` — SQLite-backed storage at `/opt/tokenranger-metrics/metrics.db`, 30-day retention
+- `usage_poller.py` — Polls OpenClaw `/usage.status` every 5 min; `PruneScheduler` runs daily cleanup
+- `config.py` — `MetricsConfig` with tracked nodes: `pvet630:192.168.1.242,r430a:192.168.1.240`
+
+The plugin emits metrics fire-and-forget (never blocks the gateway). Skipped events (turn 1, trivial input) are also logged.
+
 ## Key Source Files
 
 | File | Role |
@@ -91,13 +104,47 @@ Remote GPU config for r430a: `TOKENRANGER_OLLAMA_BASE_URL=http://192.168.1.242:1
 | inferenceMode | Strategy Override | Compression |
 |---------------|-------------------|-------------|
 | `auto` | none (router probes) | Router decides based on GPU availability |
-| `cpu` | `light` | Extractive bullets via phi3.5:3b |
-| `gpu` | `full` | Deep semantic summarization via mistral:7b |
+| `cpu` | `light` | Extractive bullets via qwen3:1.7b |
+| `gpu` | `full` | Deep semantic summarization via qwen3:8b |
 | `remote` | `full` | Same as gpu, uses remote Ollama endpoint |
 
 ## Config Write Pattern
 
 The plugin uses a mutable `cfg` ref parsed from `api.pluginConfig`. Slash command changes update `cfg` in-memory (immediate effect on next hook fire), then persist to `openclaw.json` via `api.runtime.config.writeConfigFile()`.
+
+## Hook Behavior Details
+
+- **Turn 1 skip**: First turn is never compressed — preserves initial system/user constraints intact
+- **Code block stripping**: Fenced code blocks (`` ``` ``) are removed per-turn before compression; the `has_code` flag is set in turn metadata so the compressor notes "code discussed" in summaries
+- **Content extraction**: Handles both plain string and array content block formats (`[{type:"text", text:"..."}]`)
+- **prependContext**: Compressed output is returned as `{prependContext}` which the gateway prepends to the prompt sent to the cloud LLM
+- **Hook context**: The `before_agent_start` handler accepts `(event, ctx)` where `ctx` provides `sessionId`, `agentId`, `sessionKey`, and `messageProvider`
+
+## Turn Tagging
+
+Messages are serialized with structured tags before compression:
+
+```
+[T1:user|520c] Scrape 100 luxury apartments...
+[T2:asst|1.2k|code] Verified initial URLs, updated script...
+[T3:user|180c] Also add Broadstone properties
+```
+
+Tag format: `[T{n}:{role}|{size}{|flags}]` where:
+- `n` — sequential turn number (derived from message index)
+- `role` — `user` or `asst`
+- `size` — original char count (`520c` or `1.2k`)
+- `flags` — `|code` if the turn contained fenced code blocks
+
+Turn metadata (`TurnMeta[]`) travels from the plugin through the compress client to the Python service. The compressor uses it to:
+- Preserve early user turns (T1, T2) nearly verbatim — these contain task specs and constraints
+- Note which turns had code blocks stripped
+- Instruct the SLM to output factual state, not first-person commitments ("I'll...")
+- Output tagged summaries: `[T1] bullet summary`
+
+## TurnTagging (Research)
+
+Untracked 43k research document analyzing V1 compression artifacts — specifically "planning voice leakage" where the SLM flattens internal agent monologue into visible assistant messages. The turn tagging implementation above is the V2 solution derived from this research.
 
 ## Known Gotchas
 

@@ -27,8 +27,10 @@ class UsagePoller:
         self.interval = interval
 
     async def poll_once(self) -> None:
-        for node in self.nodes:
-            await self._poll_node(node)
+        await asyncio.gather(
+            *(self._poll_node(node) for node in self.nodes),
+            return_exceptions=True,
+        )
 
     async def poll_loop(self) -> None:
         logger.info(
@@ -54,7 +56,7 @@ class UsagePoller:
                 except Exception:
                     status = "offline"
 
-                self.store.update_node_status(node.node_id, status)
+                await asyncio.to_thread(self.store.update_node_status, node.node_id, status)
 
                 # Poll OpenClaw gateway usage
                 try:
@@ -62,7 +64,8 @@ class UsagePoller:
                     if usage_resp.status_code == 200:
                         usage_data = usage_resp.json()
                         if isinstance(usage_data, dict):
-                            self.store.record_api_usage(
+                            await asyncio.to_thread(
+                                self.store.record_api_usage,
                                 node=node.node_id,
                                 usage=usage_data,
                             )
@@ -71,7 +74,7 @@ class UsagePoller:
 
         except Exception as e:
             logger.warning("Failed to poll node %s: %s", node.node_id, e)
-            self.store.update_node_status(node.node_id, "offline")
+            await asyncio.to_thread(self.store.update_node_status, node.node_id, "offline")
 
 
 class PruneScheduler:
@@ -85,7 +88,7 @@ class PruneScheduler:
     async def prune_loop(self) -> None:
         logger.info("Prune scheduler started: %d day retention", self.retention_days)
         while True:
-            deleted = self.store.prune(self.retention_days)
+            deleted = await asyncio.to_thread(self.store.prune, self.retention_days)
             if deleted:
                 logger.info("Pruned %d expired rows", deleted)
             await asyncio.sleep(self.interval)

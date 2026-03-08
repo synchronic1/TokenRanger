@@ -24,7 +24,7 @@
       },
       "preferredModel": {
         "type": "string",
-        "default": "mistral:7b"
+        "default": "qwen3:8b"
       },
       "compressionStrategy": {
         "type": "string",
@@ -61,7 +61,7 @@
     },
     "preferredModel": {
       "label": "Preferred SLM Model",
-      "help": "Ollama model for context compression (e.g. mistral:7b, phi3.5:3b)"
+      "help": "Ollama model for context compression (e.g. qwen3:8b, qwen3:1.7b)"
     },
     "compressionStrategy": {
       "label": "Compression Strategy",

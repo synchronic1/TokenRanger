@@ -95,7 +95,7 @@ class InferenceRouter:
                 )
                 return profile
 
-        except (httpx.ConnectError, httpx.TimeoutException) as e:
+        except (httpx.ConnectError, httpx.TimeoutException, ValueError, KeyError) as e:
             logger.warning("Ollama unreachable at %s: %s", url, e)
             return self._unavailable_profile(now)
 
@@ -120,7 +120,7 @@ class InferenceRouter:
             pass
 
         # Fallback: load a small model with raw=true to check VRAM allocation
-        preferred = ["phi3.5:3b", "mistral:7b-instruct", "qwen2.5:7b"]
+        preferred = ["qwen3:1.7b", "qwen3:4b", "qwen3:8b", "gemma3:4b"]
         model = next((m for m in preferred if m in available_models), None)
         if not model and available_models:
             model = available_models[0]
@@ -131,7 +131,7 @@ class InferenceRouter:
             await client.post(
                 f"{url}/api/generate",
                 json={"model": model, "prompt": "", "raw": True, "stream": False},
-                timeout=30.0,
+                timeout=max(self.settings.ollama_timeout, 10.0),
             )
             ps_resp = await client.get(f"{url}/api/ps")
             if ps_resp.status_code == 200:
@@ -139,10 +139,12 @@ class InferenceRouter:
                 if running:
                     size = running[0].get("size", 0)
                     size_vram = running[0].get("size_vram", 0)
-                    if size > 0 and size_vram / size > 0.8:
-                        return ComputeClass.GPU_FULL
-                    elif size > 0 and size_vram > 0:
-                        return ComputeClass.GPU_PARTIAL
+                    if size > 0:
+                        vram_ratio = size_vram / size
+                        if vram_ratio > 0.8:
+                            return ComputeClass.GPU_FULL
+                        elif size_vram > 0:
+                            return ComputeClass.GPU_PARTIAL
         except Exception as e:
             logger.warning("probe: generate-based compute inference failed: %s", e)
         return ComputeClass.CPU_ONLY

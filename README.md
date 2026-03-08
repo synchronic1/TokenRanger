@@ -8,7 +8,7 @@ Compresses session context via a local SLM (Ollama) before sending to cloud LLMs
 User message → OpenClaw gateway
   → before_agent_start hook fires
   → Plugin sends history to localhost:8100/compress
-  → FastAPI service runs LangChain LCEL chain (Ollama mistral:7b)
+  → FastAPI service runs LangChain LCEL chain (Ollama qwen3:8b)
   → Compressed summary returned as { prependContext }
   → Cloud LLM receives compressed context instead of full history
 ```
@@ -47,7 +47,7 @@ Add to `~/.openclaw/openclaw.json`:
           "timeoutMs": 10000,
           "minPromptLength": 500,
           "ollamaUrl": "http://127.0.0.1:11434",
-          "preferredModel": "mistral:7b",
+          "preferredModel": "qwen3:8b",
           "compressionStrategy": "auto",
           "inferenceMode": "auto"
         }
@@ -63,7 +63,7 @@ Add to `~/.openclaw/openclaw.json`:
 | `timeoutMs` | `10000` | Max wait before passthrough (ms) |
 | `minPromptLength` | `500` | Minimum history length (chars) to trigger compression |
 | `ollamaUrl` | `http://127.0.0.1:11434` | Ollama API endpoint |
-| `preferredModel` | `mistral:7b` | Ollama model for compression |
+| `preferredModel` | `qwen3:8b` | Ollama model for compression |
 | `compressionStrategy` | `auto` | `auto`/`full`/`light`/`passthrough` |
 | `inferenceMode` | `auto` | `auto`/`cpu`/`gpu`/`remote` — controls inference strategy override |
 
@@ -109,8 +109,8 @@ Use `/tokenranger` in any chat to access the settings menu:
 │                ▼                              │
 │  ┌──────────────────────┐                    │
 │  │  Ollama (localhost)   │                    │
-│  │  mistral:7b (GPU)     │                    │
-│  │  phi3.5:3b (CPU)      │                    │
+│  │  qwen3:8b (GPU)       │                    │
+│  │  qwen3:1.7b (CPU)     │                    │
 │  └──────────────────────┘                    │
 └─────────────────────────────────────────────┘
 ```
@@ -119,34 +119,36 @@ Use `/tokenranger` in any chat to access the settings menu:
 
 | Strategy | When | Model | Description |
 |----------|------|-------|-------------|
-| `full` | GPU available (>80% VRAM) | mistral:7b | Deep semantic summarization |
-| `light` | CPU only | phi3.5:3b | Extractive bullet points |
+| `full` | GPU available (>80% VRAM) | qwen3:8b | Deep semantic summarization |
+| `light` | CPU only | qwen3:1.7b | Extractive bullet points |
 | `passthrough` | Ollama down | none | Truncate to last 20 lines |
 
 ## Measured Results
 
-### Latest: 5-turn Discord bot conversation (2026-02-26, post code-review fixes)
+### Model Comparison Benchmark (2026-03-08, pvet630 3x NVIDIA GPU)
 
-| Turn | Input (tokens) | Compressed (tokens) | Reduction | Latency |
-|------|---------------|--------------------:|----------:|--------:|
-| 1    | 241           | 121                 | 49.8%     | 916ms   |
-| 2    | 732           | 125                 | 82.9%     | 1,086ms |
-| 3    | 1,180         | 150                 | 87.3%     | 1,375ms |
-| 4    | 1,685         | 212                 | 87.4%     | 1,960ms |
-| 5    | 2,028         | 277                 | 86.3%     | 2,420ms |
+Tested with structured turn-tagged payloads (SHORT 749c/3 turns, MEDIUM 1959c/5 turns, LONG 4206c/8 turns).
+Qwen3 models use `/no_think` prefix to disable hidden thinking tokens.
 
-**Cumulative**: 5,866 input → 885 output tokens (**84.9% overall reduction**)
-**Avg latency**: 1.6s per turn (GPU-full, mistral:7b-instruct)
-**Projected savings**: $37/month on GPT-4o at 500 msgs/day
+| Model | SHORT | MEDIUM | LONG | Tok/s | 1st-person |
+|-------|-------|--------|------|-------|------------|
+| **qwen3:1.7b** | **54.3%** | **62.1%** | **89.8%** | **287-300** | **0** |
+| qwen2.5:7b | 78.1% | 85.9% | 82.4% | 147-152 | 0 |
+| qwen3:4b | 3.3% | 15.7% | 19.4% | 157-167 | 1 |
+| qwen3:8b | -68.4% | -0.4% | 44.4% | 115-120 | 1 |
+| mistral:7b | 6.7% | 24.0% | 37.2% | 143-149 | 0 |
+| llama3.1:8b | 28.3% | 41.4% | 38.4% | 63-65 | 0 |
+| llama3.2:3b | 51.0% | 28.9% | 47.2% | 124-132 | 0 |
 
-### Previous: Token comparison benchmark (2026-02-25)
+**Winner**: qwen3:1.7b — highest reduction on long contexts (89.8%), fastest throughput (300 tok/s), zero first-person voice leakage. Larger models are too conservative, echoing input rather than summarizing.
+
+### Previous: 5-turn Discord bot conversation (2026-02-26, mistral:7b-instruct)
 
 | Metric | Value |
 |--------|-------|
-| Ollama token savings | 85.0% |
-| Gemini token savings | 85.9% |
-| Compression latency | 1.6-2.9s per turn (GPU) |
-| Graceful degradation | Full passthrough if service down |
+| Overall reduction | 84.9% (5,866 → 885 tokens) |
+| Avg latency | 1.6s per turn (GPU-full) |
+| Projected savings | $37/month on GPT-4o at 500 msgs/day |
 
 See [CHANGELOG.md](CHANGELOG.md) for full history.
 

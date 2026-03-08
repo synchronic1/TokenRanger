@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import os
 import sqlite3
 import statistics
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -70,6 +73,7 @@ class MetricsStore:
     def __init__(self, db_path: str, token_ratio: int = 4):
         self.db_path = db_path
         self.token_ratio = token_ratio
+        self._lock = threading.Lock()
 
         # Ensure parent directory exists
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -80,12 +84,26 @@ class MetricsStore:
         self.conn.executescript(SCHEMA)
         self.conn.commit()
 
+        # Cache column lists (schema is static at runtime)
+        self._event_cols = [
+            d[0] for d in self.conn.execute("SELECT * FROM compression_events LIMIT 0").description
+        ]
+        self._node_cols = [
+            d[0] for d in self.conn.execute("SELECT * FROM nodes LIMIT 0").description
+        ]
+
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
 
     def record_compression(self, event: dict[str, Any]) -> int:
         now = event.get("timestamp") or datetime.now(timezone.utc).isoformat()
+        # Validate timestamp format
+        try:
+            datetime.fromisoformat(now)
+        except (ValueError, TypeError):
+            now = datetime.now(timezone.utc).isoformat()
+
         node = event.get("node", "unknown")
         original_chars = int(event.get("original_chars", 0))
         compressed_chars = int(event.get("compressed_chars", 0))
@@ -95,87 +113,89 @@ class MetricsStore:
         tokens_saved = original_tokens - compressed_tokens
         skipped = 1 if event.get("skipped") else 0
 
-        cur = self.conn.execute(
-            """INSERT INTO compression_events
-               (timestamp, node, session_id, user_turn,
-                original_chars, compressed_chars, char_reduction_pct,
-                original_tokens_est, compressed_tokens_est, tokens_saved_est,
-                compute_class, model_used, strategy, latency_ms,
-                code_blocks_stripped, skipped, skip_reason)
-               VALUES (?,?,?,?, ?,?,?, ?,?,?, ?,?,?,?, ?,?,?)""",
-            (
-                now,
-                node,
-                event.get("session_id"),
-                event.get("user_turn"),
-                original_chars,
-                compressed_chars,
-                char_reduction,
-                original_tokens,
-                compressed_tokens,
-                tokens_saved,
-                event.get("compute_class", "unknown"),
-                event.get("model_used", "unknown"),
-                event.get("strategy", "unknown"),
-                float(event.get("latency_ms", 0)),
-                int(event.get("code_blocks_stripped", 0)),
-                skipped,
-                event.get("skip_reason"),
-            ),
-        )
-        self.conn.commit()
-
-        # Update node last_seen
-        self.conn.execute(
-            """INSERT INTO nodes (node_id, ip, gateway_url, tokenranger_url, last_seen, status)
-               VALUES (?, '', '', '', ?, 'healthy')
-               ON CONFLICT(node_id) DO UPDATE SET last_seen = ?, status = 'healthy'""",
-            (node, now, now),
-        )
-        self.conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
+        with self._lock:
+            cur = self.conn.execute(
+                """INSERT INTO compression_events
+                   (timestamp, node, session_id, user_turn,
+                    original_chars, compressed_chars, char_reduction_pct,
+                    original_tokens_est, compressed_tokens_est, tokens_saved_est,
+                    compute_class, model_used, strategy, latency_ms,
+                    code_blocks_stripped, skipped, skip_reason)
+                   VALUES (?,?,?,?, ?,?,?, ?,?,?, ?,?,?,?, ?,?,?)""",
+                (
+                    now,
+                    node,
+                    event.get("session_id"),
+                    event.get("user_turn"),
+                    original_chars,
+                    compressed_chars,
+                    char_reduction,
+                    original_tokens,
+                    compressed_tokens,
+                    tokens_saved,
+                    event.get("compute_class", "unknown"),
+                    event.get("model_used", "unknown"),
+                    event.get("strategy", "unknown"),
+                    float(event.get("latency_ms", 0)),
+                    int(event.get("code_blocks_stripped", 0)),
+                    skipped,
+                    event.get("skip_reason"),
+                ),
+            )
+            # Update node last_seen in same transaction
+            self.conn.execute(
+                """INSERT INTO nodes (node_id, ip, gateway_url, tokenranger_url, last_seen, status)
+                   VALUES (?, '', '', '', ?, 'healthy')
+                   ON CONFLICT(node_id) DO UPDATE SET last_seen = ?, status = 'healthy'""",
+                (node, now, now),
+            )
+            self.conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
 
     def record_api_usage(self, node: str, usage: dict[str, Any]) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        self.conn.execute(
-            """INSERT INTO api_usage_snapshots
-               (timestamp, node, session_id, input_tokens, output_tokens,
-                total_tokens, cache_read, cache_write, model, provider)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (
-                now,
-                node,
-                usage.get("session_id"),
-                usage.get("input_tokens", 0),
-                usage.get("output_tokens", 0),
-                usage.get("total_tokens", 0),
-                usage.get("cache_read", 0),
-                usage.get("cache_write", 0),
-                usage.get("model"),
-                usage.get("provider"),
-            ),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO api_usage_snapshots
+                   (timestamp, node, session_id, input_tokens, output_tokens,
+                    total_tokens, cache_read, cache_write, model, provider)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    now,
+                    node,
+                    usage.get("session_id"),
+                    usage.get("input_tokens", 0),
+                    usage.get("output_tokens", 0),
+                    usage.get("total_tokens", 0),
+                    usage.get("cache_read", 0),
+                    usage.get("cache_write", 0),
+                    usage.get("model"),
+                    usage.get("provider"),
+                ),
+            )
+            self.conn.commit()
 
     def update_node_status(self, node_id: str, status: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        self.conn.execute(
-            """INSERT INTO nodes (node_id, ip, gateway_url, tokenranger_url, last_seen, status)
-               VALUES (?, '', '', '', ?, ?)
-               ON CONFLICT(node_id) DO UPDATE SET status = ?, last_seen = ?""",
-            (node_id, now, status, status, now),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO nodes (node_id, ip, gateway_url, tokenranger_url, last_seen, status)
+                   VALUES (?, '', '', '', ?, ?)
+                   ON CONFLICT(node_id) DO UPDATE SET status = ?, last_seen = ?""",
+                (node_id, now, status, status, now),
+            )
+            self.conn.commit()
 
     def register_node(self, node_id: str, ip: str, gateway_url: str, tokenranger_url: str) -> None:
-        self.conn.execute(
-            """INSERT INTO nodes (node_id, ip, gateway_url, tokenranger_url, status)
-               VALUES (?,?,?,?, 'unknown')
-               ON CONFLICT(node_id) DO UPDATE SET
-                 ip = ?, gateway_url = ?, tokenranger_url = ?""",
-            (node_id, ip, gateway_url, tokenranger_url, ip, gateway_url, tokenranger_url),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO nodes (node_id, ip, gateway_url, tokenranger_url, status)
+                   VALUES (?,?,?,?, 'unknown')
+                   ON CONFLICT(node_id) DO UPDATE SET
+                     ip = ?, gateway_url = ?, tokenranger_url = ?""",
+                (node_id, ip, gateway_url, tokenranger_url, ip, gateway_url, tokenranger_url),
+            )
+            self.conn.commit()
 
     # ------------------------------------------------------------------
     # Read
@@ -201,11 +221,12 @@ class MetricsStore:
             params.append(node)
 
         where = " AND ".join(conditions) if conditions else "1=1"
-        rows = self.conn.execute(
-            f"SELECT * FROM compression_events WHERE {where} ORDER BY timestamp DESC LIMIT ?",
-            [*params, limit],
-        ).fetchall()
-        cols = [d[0] for d in self.conn.execute("SELECT * FROM compression_events LIMIT 0").description]
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM compression_events WHERE {where} ORDER BY timestamp DESC LIMIT ?",
+                [*params, limit],
+            ).fetchall()
+        cols = self._event_cols
         return [dict(zip(cols, row)) for row in rows]
 
     def summary(self, hours: int = 24, node: str | None = None) -> dict[str, Any]:
@@ -217,11 +238,12 @@ class MetricsStore:
             params.append(node)
         where = " AND ".join(conditions)
 
-        rows = self.conn.execute(
-            f"SELECT * FROM compression_events WHERE {where} ORDER BY timestamp",
-            params,
-        ).fetchall()
-        cols = [d[0] for d in self.conn.execute("SELECT * FROM compression_events LIMIT 0").description]
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM compression_events WHERE {where} ORDER BY timestamp",
+                params,
+            ).fetchall()
+        cols = self._event_cols
         events = [dict(zip(cols, row)) for row in rows]
 
         compressed = [e for e in events if not e["skipped"]]
@@ -260,11 +282,12 @@ class MetricsStore:
 
     def compare_nodes(self, hours: int = 24) -> dict[str, Any]:
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        rows = self.conn.execute(
-            "SELECT * FROM compression_events WHERE timestamp >= ? ORDER BY timestamp",
-            (since,),
-        ).fetchall()
-        cols = [d[0] for d in self.conn.execute("SELECT * FROM compression_events LIMIT 0").description]
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM compression_events WHERE timestamp >= ? ORDER BY timestamp",
+                (since,),
+            ).fetchall()
+        cols = self._event_cols
         events = [dict(zip(cols, row)) for row in rows]
 
         nodes_data: dict[str, list[dict]] = {}
@@ -295,9 +318,10 @@ class MetricsStore:
 
         # Add node status
         for nid in result:
-            node_row = self.conn.execute(
-                "SELECT last_seen, status FROM nodes WHERE node_id = ?", (nid,)
-            ).fetchone()
+            with self._lock:
+                node_row = self.conn.execute(
+                    "SELECT last_seen, status FROM nodes WHERE node_id = ?", (nid,)
+                ).fetchone()
             if node_row:
                 result[nid]["last_seen"] = node_row[0]
                 result[nid]["status"] = node_row[1]
@@ -305,15 +329,17 @@ class MetricsStore:
         return {"window_hours": hours, "nodes": result}
 
     def node_statuses(self) -> list[dict[str, Any]]:
-        rows = self.conn.execute("SELECT * FROM nodes").fetchall()
-        cols = [d[0] for d in self.conn.execute("SELECT * FROM nodes LIMIT 0").description]
+        with self._lock:
+            rows = self.conn.execute("SELECT * FROM nodes").fetchall()
+        cols = self._node_cols
         return [dict(zip(cols, row)) for row in rows]
 
     def event_count(self, hours: int = 24) -> int:
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        row = self.conn.execute(
-            "SELECT COUNT(*) FROM compression_events WHERE timestamp >= ?", (since,)
-        ).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM compression_events WHERE timestamp >= ?", (since,)
+            ).fetchone()
         return row[0] if row else 0
 
     def db_size(self) -> int:
@@ -326,119 +352,127 @@ class MetricsStore:
     # Prometheus
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _prom_label(v: str) -> str:
+        """Escape a value for use in a Prometheus label."""
+        return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
     def prometheus_metrics(self) -> str:
         """Generate Prometheus text exposition format."""
         since_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        _l = self._prom_label
 
         lines: list[str] = []
 
-        # Compressions total by node+strategy
-        rows = self.conn.execute(
-            """SELECT node, strategy, COUNT(*) FROM compression_events
-               WHERE skipped = 0 GROUP BY node, strategy"""
-        ).fetchall()
-        lines.append("# HELP tokenranger_compressions_total Total compression events")
-        lines.append("# TYPE tokenranger_compressions_total counter")
-        for node, strategy, count in rows:
-            lines.append(f'tokenranger_compressions_total{{node="{node}",strategy="{strategy}"}} {count}')
+        with self._lock:
+            # Compressions total by node+strategy
+            rows = self.conn.execute(
+                """SELECT node, strategy, COUNT(*) FROM compression_events
+                   WHERE skipped = 0 GROUP BY node, strategy"""
+            ).fetchall()
+            lines.append("# HELP tokenranger_compressions_total Total compression events")
+            lines.append("# TYPE tokenranger_compressions_total counter")
+            for node, strategy, count in rows:
+                lines.append(f'tokenranger_compressions_total{{node="{_l(node)}",strategy="{_l(strategy)}"}} {count}')
 
-        # Tokens saved total by node
-        rows = self.conn.execute(
-            """SELECT node, SUM(tokens_saved_est) FROM compression_events
-               WHERE skipped = 0 GROUP BY node"""
-        ).fetchall()
-        lines.append("# HELP tokenranger_tokens_saved_total Estimated tokens saved")
-        lines.append("# TYPE tokenranger_tokens_saved_total counter")
-        for node, total in rows:
-            lines.append(f'tokenranger_tokens_saved_total{{node="{node}"}} {total or 0}')
+            # Tokens saved total by node
+            rows = self.conn.execute(
+                """SELECT node, SUM(tokens_saved_est) FROM compression_events
+                   WHERE skipped = 0 GROUP BY node"""
+            ).fetchall()
+            lines.append("# HELP tokenranger_tokens_saved_total Estimated tokens saved")
+            lines.append("# TYPE tokenranger_tokens_saved_total counter")
+            for node, total in rows:
+                lines.append(f'tokenranger_tokens_saved_total{{node="{_l(node)}"}} {total or 0}')
 
-        # Chars input total by node
-        rows = self.conn.execute(
-            """SELECT node, SUM(original_chars) FROM compression_events
-               WHERE skipped = 0 GROUP BY node"""
-        ).fetchall()
-        lines.append("# HELP tokenranger_chars_input_total Total input characters processed")
-        lines.append("# TYPE tokenranger_chars_input_total counter")
-        for node, total in rows:
-            lines.append(f'tokenranger_chars_input_total{{node="{node}"}} {total or 0}')
+            # Chars input total by node
+            rows = self.conn.execute(
+                """SELECT node, SUM(original_chars) FROM compression_events
+                   WHERE skipped = 0 GROUP BY node"""
+            ).fetchall()
+            lines.append("# HELP tokenranger_chars_input_total Total input characters processed")
+            lines.append("# TYPE tokenranger_chars_input_total counter")
+            for node, total in rows:
+                lines.append(f'tokenranger_chars_input_total{{node="{_l(node)}"}} {total or 0}')
 
-        # Compression ratio gauge (24h window)
-        rows = self.conn.execute(
-            """SELECT node, SUM(original_chars), SUM(compressed_chars)
-               FROM compression_events
-               WHERE skipped = 0 AND timestamp >= ?
-               GROUP BY node""",
-            (since_24h,),
-        ).fetchall()
-        lines.append("# HELP tokenranger_compression_ratio Compression ratio (24h, 0-1)")
-        lines.append("# TYPE tokenranger_compression_ratio gauge")
-        for node, orig, comp in rows:
-            ratio = round(1 - (comp or 0) / max(orig or 1, 1), 3)
-            lines.append(f'tokenranger_compression_ratio{{node="{node}"}} {ratio}')
+            # Compression ratio gauge (24h window)
+            rows = self.conn.execute(
+                """SELECT node, SUM(original_chars), SUM(compressed_chars)
+                   FROM compression_events
+                   WHERE skipped = 0 AND timestamp >= ?
+                   GROUP BY node""",
+                (since_24h,),
+            ).fetchall()
+            lines.append("# HELP tokenranger_compression_ratio Compression ratio (24h, 0-1)")
+            lines.append("# TYPE tokenranger_compression_ratio gauge")
+            for node, orig, comp in rows:
+                ratio = round(1 - (comp or 0) / max(orig or 1, 1), 3)
+                lines.append(f'tokenranger_compression_ratio{{node="{_l(node)}"}} {ratio}')
 
-        # Latency histogram by node
-        buckets = [0.5, 1.0, 2.0, 3.0, 5.0, 10.0]
-        rows = self.conn.execute(
-            """SELECT node, latency_ms FROM compression_events
-               WHERE skipped = 0 AND timestamp >= ?""",
-            (since_24h,),
-        ).fetchall()
-        node_latencies: dict[str, list[float]] = {}
-        for node, lat in rows:
-            node_latencies.setdefault(node, []).append(lat / 1000.0)
+            # Latency histogram by node
+            buckets = [0.5, 1.0, 2.0, 3.0, 5.0, 10.0]
+            rows = self.conn.execute(
+                """SELECT node, latency_ms FROM compression_events
+                   WHERE skipped = 0 AND timestamp >= ?""",
+                (since_24h,),
+            ).fetchall()
+            node_latencies: dict[str, list[float]] = {}
+            for node, lat in rows:
+                node_latencies.setdefault(node, []).append(lat / 1000.0)
 
-        lines.append("# HELP tokenranger_compression_latency_seconds Compression latency")
-        lines.append("# TYPE tokenranger_compression_latency_seconds histogram")
-        for node, lats in node_latencies.items():
-            for b in buckets:
-                count = sum(1 for l in lats if l <= b)
+            lines.append("# HELP tokenranger_compression_latency_seconds Compression latency")
+            lines.append("# TYPE tokenranger_compression_latency_seconds histogram")
+            for node, lats in node_latencies.items():
+                escaped_node = _l(node)
+                for b in buckets:
+                    count = sum(1 for l in lats if l <= b)
+                    lines.append(
+                        f'tokenranger_compression_latency_seconds_bucket{{node="{escaped_node}",le="{b}"}} {count}'
+                    )
                 lines.append(
-                    f'tokenranger_compression_latency_seconds_bucket{{node="{node}",le="{b}"}} {count}'
+                    f'tokenranger_compression_latency_seconds_bucket{{node="{escaped_node}",le="+Inf"}} {len(lats)}'
                 )
-            lines.append(
-                f'tokenranger_compression_latency_seconds_bucket{{node="{node}",le="+Inf"}} {len(lats)}'
-            )
-            lines.append(
-                f'tokenranger_compression_latency_seconds_sum{{node="{node}"}} {sum(lats):.3f}'
-            )
-            lines.append(
-                f'tokenranger_compression_latency_seconds_count{{node="{node}"}} {len(lats)}'
-            )
+                lines.append(
+                    f'tokenranger_compression_latency_seconds_sum{{node="{escaped_node}"}} {sum(lats):.3f}'
+                )
+                lines.append(
+                    f'tokenranger_compression_latency_seconds_count{{node="{escaped_node}"}} {len(lats)}'
+                )
 
-        # Skipped total by node+reason
-        rows = self.conn.execute(
-            """SELECT node, skip_reason, COUNT(*) FROM compression_events
-               WHERE skipped = 1 GROUP BY node, skip_reason"""
-        ).fetchall()
-        lines.append("# HELP tokenranger_skipped_total Turns skipped by reason")
-        lines.append("# TYPE tokenranger_skipped_total counter")
-        for node, reason, count in rows:
-            lines.append(
-                f'tokenranger_skipped_total{{node="{node}",reason="{reason or "unknown"}"}} {count}'
-            )
+            # Skipped total by node+reason
+            rows = self.conn.execute(
+                """SELECT node, skip_reason, COUNT(*) FROM compression_events
+                   WHERE skipped = 1 GROUP BY node, skip_reason"""
+            ).fetchall()
+            lines.append("# HELP tokenranger_skipped_total Turns skipped by reason")
+            lines.append("# TYPE tokenranger_skipped_total counter")
+            for node, reason, count in rows:
+                lines.append(
+                    f'tokenranger_skipped_total{{node="{_l(node)}",reason="{_l(reason or "unknown")}"}} {count}'
+                )
 
-        # Node health
-        node_rows = self.conn.execute("SELECT node_id, status FROM nodes").fetchall()
-        lines.append("# HELP tokenranger_node_up Node reachability (1=healthy, 0=offline)")
-        lines.append("# TYPE tokenranger_node_up gauge")
-        for nid, status in node_rows:
-            val = 1 if status == "healthy" else 0
-            lines.append(f'tokenranger_node_up{{node="{nid}"}} {val}')
+            # Node health
+            node_rows = self.conn.execute("SELECT node_id, status FROM nodes").fetchall()
+            lines.append("# HELP tokenranger_node_up Node reachability (1=healthy, 0=offline)")
+            lines.append("# TYPE tokenranger_node_up gauge")
+            for nid, status in node_rows:
+                val = 1 if status == "healthy" else 0
+                lines.append(f'tokenranger_node_up{{node="{_l(nid)}"}} {val}')
 
-        # API usage totals by node
-        rows = self.conn.execute(
-            """SELECT node, SUM(input_tokens), SUM(output_tokens)
-               FROM api_usage_snapshots GROUP BY node"""
-        ).fetchall()
-        if rows:
-            lines.append("# HELP tokenranger_api_input_tokens_total Actual API input tokens")
-            lines.append("# TYPE tokenranger_api_input_tokens_total counter")
-            for node, inp, _ in rows:
-                lines.append(f'tokenranger_api_input_tokens_total{{node="{node}"}} {inp or 0}')
-            lines.append("# HELP tokenranger_api_output_tokens_total Actual API output tokens")
-            lines.append("# TYPE tokenranger_api_output_tokens_total counter")
-            for node, _, out in rows:
-                lines.append(f'tokenranger_api_output_tokens_total{{node="{node}"}} {out or 0}')
+            # API usage totals by node
+            rows = self.conn.execute(
+                """SELECT node, SUM(input_tokens), SUM(output_tokens)
+                   FROM api_usage_snapshots GROUP BY node"""
+            ).fetchall()
+            if rows:
+                lines.append("# HELP tokenranger_api_input_tokens_total Actual API input tokens")
+                lines.append("# TYPE tokenranger_api_input_tokens_total counter")
+                for node, inp, _ in rows:
+                    lines.append(f'tokenranger_api_input_tokens_total{{node="{_l(node)}"}} {inp or 0}')
+                lines.append("# HELP tokenranger_api_output_tokens_total Actual API output tokens")
+                lines.append("# TYPE tokenranger_api_output_tokens_total counter")
+                for node, _, out in rows:
+                    lines.append(f'tokenranger_api_output_tokens_total{{node="{_l(node)}"}} {out or 0}')
 
         return "\n".join(lines) + "\n"
 
@@ -455,16 +489,20 @@ class MetricsStore:
             params.append(node)
         where = " AND ".join(conditions)
 
-        rows = self.conn.execute(
-            f"SELECT * FROM compression_events WHERE {where} ORDER BY timestamp",
-            params,
-        ).fetchall()
-        cols = [d[0] for d in self.conn.execute("SELECT * FROM compression_events LIMIT 0").description]
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM compression_events WHERE {where} ORDER BY timestamp",
+                params,
+            ).fetchall()
+        cols = self._event_cols
 
-        lines = [",".join(cols)]
-        for row in rows:
-            lines.append(",".join(str(v) if v is not None else "" for v in row))
-        return "\n".join(lines) + "\n"
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(cols)
+        writer.writerows(
+            [v if v is not None else "" for v in row] for row in rows
+        )
+        return buf.getvalue()
 
     # ------------------------------------------------------------------
     # Maintenance
@@ -472,14 +510,15 @@ class MetricsStore:
 
     def prune(self, retention_days: int = 30) -> int:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
-        cur = self.conn.execute(
-            "DELETE FROM compression_events WHERE timestamp < ?", (cutoff,)
-        )
-        self.conn.execute(
-            "DELETE FROM api_usage_snapshots WHERE timestamp < ?", (cutoff,)
-        )
-        self.conn.commit()
-        return cur.rowcount
+        with self._lock:
+            cur = self.conn.execute(
+                "DELETE FROM compression_events WHERE timestamp < ?", (cutoff,)
+            )
+            self.conn.execute(
+                "DELETE FROM api_usage_snapshots WHERE timestamp < ?", (cutoff,)
+            )
+            self.conn.commit()
+            return cur.rowcount
 
 
 # ------------------------------------------------------------------
@@ -490,12 +529,15 @@ class MetricsStore:
 def _latency_stats(latencies: list[float]) -> dict[str, float]:
     if not latencies:
         return {"mean": 0, "p50": 0, "p95": 0, "p99": 0}
-    n = len(latencies)
+    if len(latencies) < 4:
+        med = statistics.median(latencies)
+        return {"mean": round(statistics.mean(latencies), 0), "p50": med, "p95": latencies[-1], "p99": latencies[-1]}
+    qs = statistics.quantiles(latencies, n=100)
     return {
         "mean": round(statistics.mean(latencies), 0),
-        "p50": latencies[n // 2],
-        "p95": latencies[int(n * 0.95)] if n > 1 else latencies[-1],
-        "p99": latencies[int(n * 0.99)] if n > 1 else latencies[-1],
+        "p50": qs[49],
+        "p95": qs[94],
+        "p99": qs[98],
     }
 
 

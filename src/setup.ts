@@ -35,6 +35,11 @@ function escapeXml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+/** Strip characters that would break a systemd unit file line. */
+function sanitizeForSystemd(s: string): string {
+  return s.replace(/[\r\n\0]/g, "");
+}
+
 function venvBin(serviceDir: string, name: string): string {
   const subdir = process.platform === "win32" ? "Scripts" : "bin";
   const ext = process.platform === "win32" ? ".exe" : "";
@@ -65,8 +70,8 @@ function isLocalOllamaUrl(ollamaUrl: string): boolean {
 // ---------------------------------------------------------------------------
 
 /** Default model pulled on first setup. Matches config.ts DEFAULTS. */
-const DEFAULT_GPU_MODEL = "mistral:7b-instruct";
-const DEFAULT_CPU_MODEL = "phi3.5:latest";
+const DEFAULT_GPU_MODEL = "qwen3:8b";
+const DEFAULT_CPU_MODEL = "qwen3:1.7b";
 
 // ---------------------------------------------------------------------------
 // Prerequisite checks
@@ -84,7 +89,7 @@ function checkPythonVersion(): string | null {
     // "Python 3.10.12" -> "3.10.12"
     const ver = out.replace("Python ", "");
     const [major, minor] = ver.split(".").map(Number);
-    if (major >= 3 && minor >= 10) return ver;
+    if (major > 3 || (major === 3 && minor >= 10)) return ver;
     return null;
   } catch {
     return null;
@@ -297,7 +302,7 @@ export function pullOllamaModel(model: string, ollamaUrl: string, logger: Logger
 
 export function installLaunchdService(
   serviceDir: string,
-  pluginDir: string,
+  _pluginDir: string,
   config: TokenRangerConfig,
   logger: Logger,
 ): void {
@@ -362,7 +367,7 @@ export function installLaunchdService(
 
 export function installSystemdService(
   serviceDir: string,
-  pluginDir: string,
+  _pluginDir: string,
   config: TokenRangerConfig,
   logger: Logger,
 ): void {
@@ -378,9 +383,9 @@ After=ollama.service
 
 [Service]
 Type=simple
-WorkingDirectory=${serviceDir}
-ExecStart=${uvicornBin} main:app --host ${serviceHost} --port ${servicePort} --workers 1
-Environment="TOKENRANGER_OLLAMA_BASE_URL=${config.ollamaUrl}"
+WorkingDirectory=${sanitizeForSystemd(serviceDir)}
+ExecStart=${sanitizeForSystemd(uvicornBin)} main:app --host ${sanitizeForSystemd(serviceHost)} --port ${sanitizeForSystemd(servicePort)} --workers 1
+Environment="TOKENRANGER_OLLAMA_BASE_URL=${sanitizeForSystemd(config.ollamaUrl)}"
 Restart=on-failure
 RestartSec=5
 
