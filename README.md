@@ -152,6 +152,34 @@ Qwen3 models use `/no_think` prefix to disable hidden thinking tokens.
 
 See [CHANGELOG.md](CHANGELOG.md) for full history.
 
+## Using Local Models with TokenRanger
+
+TokenRanger enables practical use of local SLMs as the primary OpenClaw chat model by keeping
+conversation context within the model's context window. Without compression, conversations
+quickly exceed a 32k-131k token limit; with TokenRanger achieving 74-83% reduction per turn,
+a 32k model's effective capacity becomes equivalent to ~160k uncompressed.
+
+**Setup**: Set the chat model to a local Ollama model and configure TokenRanger to use
+`qwen3:1.7b` for compression (a different, smaller model that won't contend for resources):
+
+```json
+{
+  "agents": { "defaults": { "model": { "primary": "ollama/qwen2.5:7b" } } },
+  "plugins": {
+    "entries": {
+      "tokenranger": {
+        "enabled": true,
+        "config": { "preferredModel": "qwen3:1.7b" }
+      }
+    }
+  }
+}
+```
+
+**Requirements**: OpenClaw's hard minimum context is 16k tokens — any model above this
+threshold works. Tested with qwen2.5:7b (131k) and qwen3:8b (32k) on Apple Silicon.
+See [TESTING.md](TESTING.md) Section 12 for full benchmark results.
+
 ## Graceful Degradation
 
 The plugin never blocks or breaks the gateway:

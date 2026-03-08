@@ -388,7 +388,101 @@ r430a differences: CPU-only, remote GPU via `http://192.168.1.242:11434`, expect
 
 ---
 
-## 12. Setup CLI Verification
+## 12. Local Model Enablement — TokenRanger as Context Window Extender (2026-03-08)
+
+### Problem
+
+OpenClaw defaults to cloud models with large context windows (200k+ tokens). Local models
+(qwen2.5:7b at 131k, qwen3:8b at 32k) can technically pass OpenClaw's hard minimum context
+check (16k tokens, defined in `context-window-guard.ts`), but conversations grow beyond
+their effective capacity mid-session, causing degraded output or failures.
+
+### Context Window Architecture
+
+OpenClaw enforces context limits at two levels:
+
+1. **Model selection gate** (pre-compression): `CONTEXT_WINDOW_HARD_MIN_TOKENS = 16,000`.
+   Models below this are blocked with `FailoverError`. Warning at 32k.
+   Location: `src/agents/pi-embedded-runner/run.ts` lines 371-396.
+2. **Runtime compaction** ("safeguard" mode): budgets ~50% of context for history,
+   summarizes overflow. This is separate from TokenRanger.
+
+TokenRanger's `before_agent_start` hook fires **after** the model selection gate but
+**before** prompt assembly, compressing the conversation history so it fits within the
+local model's context window.
+
+### Test Configuration (macOS, Apple Silicon)
+
+| Component | Config |
+|-----------|--------|
+| Chat model | `ollama/qwen2.5:7b` (131k context) |
+| Compression model | `qwen3:1.7b` via TokenRanger (set in `preferredModel` config) |
+| Platform | macOS, Apple Silicon (Metal GPU) |
+| Service | launchd `com.openclaw.tokenranger`, port 8100 |
+| Environment | `TOKENRANGER_GPU_COMPRESSION_MODEL=qwen3:1.7b` |
+
+### Results
+
+Multi-turn conversation with growing context (task management API design):
+
+| Turn | Input (chars) | Output (chars) | Reduction | Latency |
+|------|--------------|----------------|-----------|---------|
+| 2 | 3,037 | 1,464 | 52% | 10.8s (cold start) |
+| 3 | 3,084 | 798 | **74%** | **2.9s** (warm) |
+| 4 | 4,144 | 968 | **77%** | 7.7s |
+| 5 | 5,388 | 927 | **83%** | 14.2s |
+| 6 | 5,662 | 1,214 | **79%** | 9.1s |
+
+The local qwen2.5:7b model successfully handled all compressed prompts without context
+window errors. Compression maintained 74-83% reduction on warm cache.
+
+### Key Findings
+
+1. **TokenRanger enables practical local model usage** — by compressing history each turn,
+   the effective context capacity of a 32k model becomes equivalent to ~160k uncompressed
+2. **Model contention on shared GPU** — on Apple Silicon, the compression model (qwen3:1.7b)
+   and chat model (qwen2.5:7b) compete for unified memory, causing variable latency.
+   Cold-start turns take 10-14s; warm-cache turns take 3-8s
+3. **`preferredModel` config overrides inference router** — the plugin config's
+   `preferredModel` field takes priority over the service's `TOKENRANGER_GPU_COMPRESSION_MODEL`
+   env var. Must set both consistently
+4. **Python 3.9 compatibility** — macOS system Python is 3.9, requiring
+   `from __future__ import annotations` for `str | None` type syntax
+
+### Setup for Local Model Usage
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": { "primary": "ollama/qwen2.5:7b" }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "tokenranger": {
+        "enabled": true,
+        "config": {
+          "preferredModel": "qwen3:1.7b",
+          "inferenceMode": "auto"
+        }
+      }
+    }
+  }
+}
+```
+
+LaunchAgent env vars (macOS):
+```xml
+<key>TOKENRANGER_GPU_COMPRESSION_MODEL</key>
+<string>qwen3:1.7b</string>
+<key>TOKENRANGER_GPU_FAST_MODEL</key>
+<string>qwen3:1.7b</string>
+```
+
+---
+
+## 13. Setup CLI Verification
 
 ```bash
 $ openclaw tokenranger setup

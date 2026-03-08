@@ -73,6 +73,19 @@ Deployed paths: `~/.openclaw/extensions/tokenranger/` (built JS), `~/.openclaw/s
 
 Remote GPU config for r430a: `TOKENRANGER_OLLAMA_BASE_URL=http://192.168.1.242:11434`
 
+### Local Model Enablement (macOS)
+
+TokenRanger extends small local models' effective context by compressing history each turn.
+A 32k-context model behaves like 160k+ with 74-83% compression. OpenClaw's hard minimum
+is 16k tokens (`CONTEXT_WINDOW_HARD_MIN_TOKENS` in `context-window-guard.ts`).
+
+macOS setup uses launchd (`com.openclaw.tokenranger.plist`) with env vars:
+`TOKENRANGER_GPU_COMPRESSION_MODEL=qwen3:1.7b`, `TOKENRANGER_GPU_FAST_MODEL=qwen3:1.7b`.
+The `preferredModel` in `openclaw.json` plugin config overrides the inference router's
+model selection, so both must be set consistently.
+
+Python 3.9 (macOS system Python) requires `from __future__ import annotations` in service files.
+
 ## Metrics Collector (`metrics-collector/`)
 
 Centralized FastAPI service on CT 203 (port 8101, `TRMX_` env prefix) that aggregates compression events from all nodes.
