@@ -86,6 +86,14 @@ model selection, so both must be set consistently.
 
 Python 3.9 (macOS system Python) requires `from __future__ import annotations` in service files.
 
+### Automatic Timeout Adjustment
+
+When the plugin detects a local chat model (`ollama/` or `mlx-local/` prefix in
+`agents.defaults.model.primary`), it automatically:
+1. Increases compression timeout from 10s → 30s (local compression is slower)
+2. Scales timeout dynamically with input size (5ms/char, capped at 120s)
+3. Ensures `agents.defaults.timeoutSeconds` is at least 300s (updates config if lower)
+
 ## Metrics Collector (`metrics-collector/`)
 
 Centralized FastAPI service on CT 203 (port 8101, `TRMX_` env prefix) that aggregates compression events from all nodes.

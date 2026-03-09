@@ -176,6 +176,10 @@ a 32k model's effective capacity becomes equivalent to ~160k uncompressed.
 }
 ```
 
+**Automatic timeout adjustment**: When TokenRanger detects a local chat model, it
+automatically increases the compression timeout (10s → 30s), scales it with input size,
+and ensures the agent timeout is at least 300s. No manual timeout tuning needed.
+
 **Requirements**: OpenClaw's hard minimum context is 16k tokens — any model above this
 threshold works. Tested with qwen2.5:7b (131k) and qwen3:8b (32k) on Apple Silicon.
 See [TESTING.md](TESTING.md) Section 12 for full benchmark results.

@@ -44,6 +44,53 @@ const tokenRangerPlugin = {
     let cfg: TokenRangerConfig = parseConfig(api.pluginConfig);
     const nodeHostname = os.hostname();
 
+    // Detect if the chat model is local (Ollama/MLX) and adjust timeouts
+    let isLocalChatModel = false;
+    try {
+      const fullConfig = api.runtime.config.loadConfig();
+      const modelCfg = fullConfig?.agents?.defaults?.model;
+      const primaryModel =
+        typeof modelCfg === "string"
+          ? modelCfg
+          : (modelCfg as Record<string, unknown> | undefined)?.primary as string ?? "";
+      isLocalChatModel =
+        primaryModel.startsWith("ollama/") || primaryModel.startsWith("mlx-local/");
+
+      if (isLocalChatModel) {
+        // Auto-increase compression timeout for local models (Apple Silicon/CPU
+        // compression takes 3-14s vs 1-3s on NVIDIA GPU)
+        if (cfg.timeoutMs <= 10_000) {
+          cfg.timeoutMs = 30_000;
+          api.logger.info(
+            `[tokenranger] Local chat model detected (${primaryModel}). ` +
+              `Compression timeout increased to ${cfg.timeoutMs}ms`,
+          );
+        }
+
+        // Ensure agent timeout is sufficient for local model inference + compression.
+        // Local models need: compression (3-14s) + model swap (5-15s) + inference (30-120s).
+        // Minimum recommended: 300s.
+        const agentTimeout = fullConfig?.agents?.defaults?.timeoutSeconds ?? 600;
+        if (agentTimeout < 300) {
+          const updated = { ...fullConfig };
+          updated.agents = updated.agents ?? {};
+          updated.agents.defaults = updated.agents.defaults ?? {};
+          updated.agents.defaults.timeoutSeconds = 300;
+          api.runtime.config.writeConfigFile(updated).catch((err: unknown) => {
+            api.logger.warn(
+              `[tokenranger] Failed to update agent timeout: ${String(err)}`,
+            );
+          });
+          api.logger.info(
+            `[tokenranger] Agent timeout was ${agentTimeout}s (too low for local models). ` +
+              `Updated to 300s in config.`,
+          );
+        }
+      }
+    } catch {
+      // Non-fatal: config read failure doesn't block plugin
+    }
+
     /** Fire-and-forget metrics emit to centralized collector. Never blocks. */
     function emitMetrics(event: Record<string, unknown>): void {
       if (!cfg.metricsEnabled) return;
@@ -215,11 +262,21 @@ const tokenRangerPlugin = {
       const modelOverride = cfg.preferredModel ? cfg.preferredModel : undefined;
 
       try {
+        // Scale compression timeout with input size for local models.
+        // Base timeout + 5ms per char keeps pace with ~200 tok/s throughput.
+        let effectiveTimeout = cfg.timeoutMs;
+        if (isLocalChatModel && taggedHistory.length > 2000) {
+          effectiveTimeout = Math.max(
+            cfg.timeoutMs,
+            Math.min(cfg.timeoutMs + Math.ceil(taggedHistory.length * 5), 120_000),
+          );
+        }
+
         const result = await compressContext({
           prompt: event.prompt ?? "",
           sessionHistory: taggedHistory,
           serviceUrl: cfg.serviceUrl,
-          timeoutMs: cfg.timeoutMs,
+          timeoutMs: effectiveTimeout,
           strategyOverride,
           modelOverride,
           turnMeta: turns,

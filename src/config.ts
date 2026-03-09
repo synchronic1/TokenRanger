@@ -20,7 +20,7 @@ export type TokenRangerConfig = {
 
 const DEFAULTS: TokenRangerConfig = {
   serviceUrl: "http://127.0.0.1:8100",
-  timeoutMs: 10_000,
+  timeoutMs: 10_000, // Auto-increased to 30s when local chat model detected
   minPromptLength: 500,
   ollamaUrl: "http://127.0.0.1:11434",
   preferredModel: "qwen3:8b",
