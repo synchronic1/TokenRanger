@@ -631,3 +631,66 @@ $ openclaw tokenranger setup
 
   Setup complete! Restart the gateway: openclaw gateway restart
 ```
+
+---
+
+## 15. Mac Local Inference Benchmark — Ollama vs MLX (2026-03-08)
+
+**Node**: Local MacBook (Apple Silicon, unified memory)
+**Goal**: Determine whether local compression is viable on Mac and compare Ollama vs MLX runtimes.
+
+### Setup
+
+- **TokenRanger service**: Running via launchd (`com.openclaw.tokenranger.plist`), Ollama backend on `localhost:11434`
+- **Ollama models available**: `qwen3:1.7b`, `qwen3:8b`, `qwen2.5:7b`, `qwen2.5:14b`
+- **MLX server**: Already running on `localhost:8800` via `~/.openclaw/mlx-venv/` (mlx-lm 0.31.0)
+- **MLX models available**: `DeepSeek-R1-0528-Qwen3-8B-MLX-4bit`, `Qwen3-14B-Claude-Distill-MLX-4Bit`, `Qwen3-14B-Claude-Distill-MLX-6Bit`
+- **Chat model during test**: `anthropic/claude-haiku-4-5-20251001` (cloud, no local contention)
+- **Benchmark payloads**: Same three structured turn-tagged payloads used in Section 2 (SHORT 749c/3 turns, MEDIUM 1959c/5 turns, LONG 4206c/8 turns)
+
+Ollama benchmark used the live TokenRanger `/compress` endpoint (end-to-end, including service overhead).
+MLX benchmark called `localhost:8800/v1/chat/completions` directly with the same system prompt as `compressor.py:_full_compression`.
+
+### Results: Ollama on Mac
+
+| Model | SHORT | MEDIUM | LONG | Avg Latency | Avg Reduction |
+|-------|-------|--------|------|-------------|---------------|
+| qwen3:1.7b | −172.3% | −8.7% | +5.5% | **7.5s** | −58.5% |
+| qwen3:8b | −89.8% | −7.9% | +4.0% | **31.3s** | −31.2% |
+
+Negative reduction = model expanded the input (output is larger than input). The `gpu_full` strategy fires even on Mac because Ollama reports GPU-class compute via `/api/ps`. The full compression prompt causes both models to over-generate on short/medium contexts.
+
+### Results: MLX on Mac
+
+| Model | SHORT | MEDIUM | LONG | Avg Latency | Avg Reduction |
+|-------|-------|--------|------|-------------|---------------|
+| DeepSeek-R1-8B-4bit | −2038% | −950% | −500% | **73.4s** | −1163% |
+| Qwen3-14B-4bit | +20.9% | +38.2% | −18.3% | **23.4s** | +13.6% |
+
+### Analysis
+
+| Dimension | Ollama qwen3:1.7b | Ollama qwen3:8b | MLX DeepSeek-R1-8B | MLX Qwen3-14B-4bit |
+|-----------|-------------------|-----------------|--------------------|--------------------|
+| Avg latency | 7.5s | 31.3s | 73.4s | 23.4s |
+| Avg reduction | −58.5% (expands) | −31.2% (expands) | −1163% (unusable) | +13.6% (marginal) |
+| Viable for compression | No | No | No | Marginal |
+
+**DeepSeek-R1**: Reasoning model — generates extensive thinking-token output regardless of `/no_think` prefix. Output is 8,000-10,000 chars for all inputs. Completely unsuitable for compression.
+
+**Qwen3-14B-4bit (MLX)**: Shows some compression capability on SHORT/MEDIUM but expands LONG contexts. At 23s average latency it is slower than Ollama qwen3:1.7b (7.5s) while producing worse reduction overall. Not viable.
+
+**Ollama qwen3:1.7b**: Fastest local option at 7.5s but consistently expands short/medium inputs. On pvet630 (NVIDIA) the same model achieves 54-90% reduction in 1-3s. The difference is explained by quantization variant and Apple Silicon's unified memory vs dedicated VRAM — Ollama on Mac uses a different quant path and the model may be running a different GGUF variant than the CUDA-optimized version on pvet630.
+
+### Model Swap Overhead (Ollama Multi-Turn)
+
+Ollama serializes model loads in a single slot by default. When the chat model (e.g. `qwen2.5:7b`) and compression model (`qwen3:1.7b`) alternate across turns:
+
+- Each model swap requires unloading the current model and loading the next: **5–15 seconds** on Apple Silicon
+- Swap latency compounds on top of inference latency: worst case ~22s per compressed turn
+- Mitigation: `OLLAMA_MAX_LOADED_MODELS=2` env var keeps both models warm simultaneously, but requires sufficient unified memory (two 7B+ models ≈ 8–12GB combined)
+
+### Conclusion
+
+**Local compression on Mac is not viable with current available models.** Neither Ollama nor MLX produces reliable compression quality, and latencies of 7–73 seconds make the overhead unacceptable for interactive use. On pvet630 with NVIDIA GPU, the same qwen3:1.7b model achieves 1–3s latency and 54–90% reduction — the gap is hardware-driven, not model-driven.
+
+**Recommended path for Mac**: Cloud API compression using a cheap provider-matched model (e.g. Claude Haiku for Anthropic sessions, GPT-4o-mini for OpenAI sessions). This achieves 0.5–2s latency, no model contention, and positive economics when the chat model is more expensive than the compressor. See README for future cloud compression architecture notes.

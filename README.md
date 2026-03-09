@@ -142,6 +142,19 @@ Qwen3 models use `/no_think` prefix to disable hidden thinking tokens.
 
 **Winner**: qwen3:1.7b — highest reduction on long contexts (89.8%), fastest throughput (300 tok/s), zero first-person voice leakage. Larger models are too conservative, echoing input rather than summarizing.
 
+### Mac Local Inference Benchmark (2026-03-08, Apple Silicon)
+
+Ollama and MLX runtimes tested with the same payloads. Neither produces viable compression.
+
+| Runtime / Model | SHORT | MEDIUM | LONG | Avg Latency | Notes |
+|-----------------|-------|--------|------|-------------|-------|
+| Ollama qwen3:1.7b | −172% | −9% | +6% | 7.5s | Expands short/medium inputs |
+| Ollama qwen3:8b | −90% | −8% | +4% | 31.3s | Too slow; expands inputs |
+| MLX Qwen3-14B-4bit | +21% | +38% | −18% | 23.4s | Marginal; slower than Ollama 1.7b |
+| MLX DeepSeek-R1-8B-4bit | −2038% | −950% | −500% | 73.4s | Reasoning model; unusable |
+
+Negative reduction = output is larger than input. The same qwen3:1.7b model achieves 54–90% reduction in 1–3s on pvet630 (NVIDIA GPU). Gap is hardware-driven: Apple Silicon unified memory vs dedicated VRAM changes quantization path and throughput. Cloud API compression is the recommended alternative for Mac. See [TESTING.md](TESTING.md) Section 15 for full analysis.
+
 ### Previous: 5-turn Discord bot conversation (2026-02-26, mistral:7b-instruct)
 
 | Metric | Value |
