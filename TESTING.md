@@ -482,7 +482,116 @@ LaunchAgent env vars (macOS):
 
 ---
 
-## 13. Setup CLI Verification
+## 13. Automatic Timeout Adjustment for Local Models (2026-03-08)
+
+### Problem
+
+When using a local chat model with TokenRanger, the total response time includes:
+1. **Compression** (3-14s on Apple Silicon with qwen3:1.7b)
+2. **Ollama model swap** (5-15s when switching from compression model to chat model)
+3. **Local model inference** (30-120s for complex responses)
+
+The default compression timeout of 10s caused frequent "operation was aborted" errors
+when compression alone exceeded the timeout, particularly on larger conversations.
+
+### OpenClaw Timeout Architecture
+
+Three independent timeout layers affect local model usage:
+
+| Layer | Config Location | Default | Controls |
+|-------|----------------|---------|----------|
+| **Compression timeout** | `plugins.entries.tokenranger.config.timeoutMs` | 10,000ms | TokenRanger HTTP call to `/compress` |
+| **Agent timeout** | `agents.defaults.timeoutSeconds` | 600s | Entire agent turn (prompt build + inference + response) |
+| **CLI timeout** | `openclaw agent --timeout` flag | 600s | CLI command wrapper |
+
+The `before_agent_start` hook return type does not include timeout override fields —
+plugins cannot modify the agent timeout per-request. The compression timeout and agent
+timeout must be configured statically or auto-adjusted at registration.
+
+Source: `CONTEXT_WINDOW_HARD_MIN_TOKENS` at `src/agents/context-window-guard.ts`,
+timeout enforcement at `src/agents/pi-embedded-runner/run/attempt.ts` lines 1558-1589,
+`resolveAgentTimeoutMs()` at `src/agents/timeout.ts`.
+
+### Solution Implemented
+
+The plugin auto-detects local models at registration time by checking if
+`agents.defaults.model.primary` starts with `ollama/` or `mlx-local/`:
+
+1. **Static increase**: Compression timeout raised from 10s → 30s
+2. **Dynamic scaling**: Per-request timeout scales with input size at 5ms/char,
+   capped at 120s. A 10k-char conversation gets a 80s timeout instead of 30s.
+3. **Agent timeout guard**: If `agents.defaults.timeoutSeconds` < 300, auto-updates
+   the config to 300s (writes to `openclaw.json`)
+
+### Verification
+
+Gateway log on startup with local model configured:
+```
+[tokenranger] Local chat model detected (ollama/qwen2.5:7b). Compression timeout increased to 30000ms
+[tokenranger] Service healthy: strategy=full, model=qwen3:1.7b, compute=gpu_full
+```
+
+### Test Results — Before vs After
+
+**Before (10s compression timeout):**
+
+Multi-turn conversation (task management API), `openclaw agent --timeout 120`:
+
+| Turn | Compression | Agent Response | Result |
+|------|------------|----------------|--------|
+| 2 | 10.8s | - | TIMEOUT (compression exceeded 10s) |
+| 3 | 2.9s | OK | OK (warm cache, under 10s) |
+| 4 | 7.7s | OK | OK |
+| 5 | 14.2s | - | TIMEOUT (compression exceeded 10s) |
+| 6 | 9.1s | OK | OK |
+
+3 of 5 turns failed or were intermittent.
+
+**After (30s auto-adjusted, dynamic scaling):**
+
+Multi-turn conversation (microservices architecture), `openclaw agent --timeout 180`:
+
+| Turn | Input (chars) | Output (chars) | Reduction | Compression Latency | Agent Response |
+|------|--------------|----------------|-----------|---------------------|----------------|
+| 1 | (skipped) | 10 chars | - | - | OK |
+| 2 | 11,068 | 4,759 | 57% | 27.9s | OK (9,516 chars) |
+| 3 | 5,015 | 926 | 82% | 8.5s | OK (8,884 chars) |
+
+All turns completed successfully. Turn 2's 27.9s compression would have timed out
+at 10s but was handled by the 30s base + dynamic scaling (11k chars × 5ms = 55s cap,
+but 30s base was sufficient).
+
+### Timeout Auto-Adjustment Logic
+
+```typescript
+// At registration:
+if (isLocalChatModel && cfg.timeoutMs <= 10_000) {
+  cfg.timeoutMs = 30_000;  // 30s base for local models
+}
+
+// Per-request dynamic scaling:
+if (isLocalChatModel && taggedHistory.length > 2000) {
+  effectiveTimeout = Math.max(
+    cfg.timeoutMs,
+    Math.min(cfg.timeoutMs + Math.ceil(taggedHistory.length * 5), 120_000),
+  );
+}
+
+// Agent timeout guard:
+if (agentTimeout < 300) {
+  // Auto-update agents.defaults.timeoutSeconds to 300 in openclaw.json
+}
+```
+
+### When Cloud Model is Active
+
+When the primary model is a cloud provider (e.g., `anthropic/claude-haiku-4-5-20251001`),
+none of these adjustments apply. The default 10s compression timeout is used, which is
+sufficient for NVIDIA GPU compression (1-3s typical latency on pvet630).
+
+---
+
+## 14. Setup CLI Verification
 
 ```bash
 $ openclaw tokenranger setup

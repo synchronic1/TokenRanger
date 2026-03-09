@@ -174,3 +174,5 @@ Untracked 43k research document analyzing V1 compression artifacts — specifica
 - Telegram `callback_data` has a 64-byte limit; `/tokenranger model ` = 19 chars → max 44 chars for model names
 - Python pip packages (`langchain`, `langchain-ollama`) are NOT renamed — these are upstream dependencies
 - Env var prefix is `TOKENRANGER_` (renamed from `BEFORE_LLM_`)
+- **Local model timeouts**: Plugin auto-detects `ollama/` or `mlx-local/` in the chat model and adjusts compression timeout (10s→30s) + dynamic scaling (5ms/char). The `before_agent_start` hook cannot override the agent timeout per-request — only config-level adjustment is possible
+- **Model contention on Apple Silicon**: Compression model and chat model share unified memory. Ollama serializes model loads, adding 5-15s swap time between compression and inference
