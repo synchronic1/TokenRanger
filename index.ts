@@ -346,66 +346,6 @@ const tokenRangerPlugin = {
       handler: async (ctx) => {
         const args = (ctx.args ?? "").trim();
         const isTelegram = ctx.channel === "telegram";
-        const isDiscord = ctx.channel === "discord";
-
-        // Helper: build Discord main menu component spec
-        async function buildDiscordMainMenu() {
-          let serviceInfo = "unreachable";
-          try {
-            const health = await checkServiceHealth(cfg.serviceUrl, 2000);
-            if (health.status === "healthy") {
-              serviceInfo = `healthy | ${health.computeClass ?? "?"} | ${health.model ?? "?"}`;
-            } else if (health.status === "degraded") {
-              serviceInfo = "degraded";
-            }
-          } catch {
-            /* keep unreachable */
-          }
-
-          const mode = cfg.inferenceMode ?? "auto";
-          const model = cfg.preferredModel ?? "(default)";
-          const shortModel = model.length > 12 ? model.slice(0, 12) : model;
-
-          let enabled = true;
-          try {
-            const fresh = api.runtime.config.loadConfig();
-            enabled = fresh.plugins?.entries?.["tokenranger"]?.enabled !== false;
-          } catch {
-            /* assume enabled */
-          }
-
-          return {
-            text: "TokenRanger Settings",
-            channelData: {
-              discord: {
-                title: "TokenRanger Settings",
-                details: [
-                  `Service: ${serviceInfo}`,
-                  `Mode: ${mode} | Model: ${model}`,
-                  `Enabled: ${enabled ? "yes" : "no"}`,
-                ],
-                rows: [
-                  {
-                    type: "buttons" as const,
-                    items: [
-                      { label: `Mode: ${mode}`, callbackArgs: "mode", style: "secondary" as const },
-                      {
-                        label: `Model: ${shortModel}`,
-                        callbackArgs: "model",
-                        style: "secondary" as const,
-                      },
-                      {
-                        label: enabled ? "Enabled: ON" : "Enabled: OFF",
-                        callbackArgs: "toggle",
-                        style: (enabled ? "success" : "danger") as "success" | "danger",
-                      },
-                    ],
-                  },
-                ],
-              },
-            },
-          };
-        }
 
         // Helper: persist a config change to disk and update in-memory
         async function updatePluginConfig(patch: Partial<TokenRangerConfig>) {
@@ -482,10 +422,6 @@ const tokenRangerPlugin = {
             };
           }
 
-          if (isDiscord) {
-            return buildDiscordMainMenu();
-          }
-
           return { text };
         }
 
@@ -515,49 +451,6 @@ const tokenRangerPlugin = {
             };
           }
 
-          if (isDiscord) {
-            return {
-              text: "Select inference mode",
-              channelData: {
-                discord: {
-                  title: "Inference Mode",
-                  details: [`Current: ${current}`],
-                  rows: [
-                    {
-                      type: "buttons",
-                      items: [
-                        {
-                          label: "CPU",
-                          callbackArgs: "mode cpu",
-                          style: current === "cpu" ? "primary" : "secondary",
-                        },
-                        {
-                          label: "GPU",
-                          callbackArgs: "mode gpu",
-                          style: current === "gpu" ? "primary" : "secondary",
-                        },
-                        {
-                          label: "Remote",
-                          callbackArgs: "mode remote",
-                          style: current === "remote" ? "primary" : "secondary",
-                        },
-                        {
-                          label: "Auto",
-                          callbackArgs: "mode auto",
-                          style: current === "auto" ? "primary" : "secondary",
-                        },
-                      ],
-                    },
-                    {
-                      type: "buttons",
-                      items: [{ label: "<< Back", callbackArgs: "", style: "secondary" }],
-                    },
-                  ],
-                },
-              },
-            };
-          }
-
           return {
             text: text + "\nOptions: cpu, gpu, remote, auto\nUse: /tokenranger mode <option>",
           };
@@ -579,11 +472,6 @@ const tokenRangerPlugin = {
                   : "auto-detect via Ollama probe";
 
           api.logger.info(`[tokenranger] inferenceMode set to ${newMode}`);
-
-          // On Discord, re-render main menu so user sees updated state
-          if (isDiscord) {
-            return buildDiscordMainMenu();
-          }
 
           return { text: `Inference mode set to: ${newMode} (${desc})` };
         }
@@ -642,35 +530,6 @@ const tokenRangerPlugin = {
             .map((m) => (m === current ? `  ${m} (current)` : `  ${m}`))
             .join("\n");
 
-          if (isDiscord) {
-            const modelOptions = models.slice(0, 25).map((m) => ({
-              label: m.length > 50 ? m.slice(0, 50) : m,
-              value: m,
-              callbackArgs: `model ${m}`,
-              isDefault: m === current,
-            }));
-            return {
-              text: "Select model",
-              channelData: {
-                discord: {
-                  title: "Select Model",
-                  details: [`Current: ${current || "default"}`],
-                  rows: [
-                    {
-                      type: "select" as const,
-                      placeholder: "Choose an Ollama model",
-                      options: modelOptions,
-                    },
-                    {
-                      type: "buttons" as const,
-                      items: [{ label: "<< Back", callbackArgs: "", style: "secondary" as const }],
-                    },
-                  ],
-                },
-              },
-            };
-          }
-
           return { text: `Available models:\n${list}\n\nUse: /tokenranger model <name>` };
         }
 
@@ -683,10 +542,6 @@ const tokenRangerPlugin = {
           }
           await updatePluginConfig({ preferredModel: newModel });
           api.logger.info(`[tokenranger] preferredModel set to ${newModel}`);
-
-          if (isDiscord) {
-            return buildDiscordMainMenu();
-          }
 
           return { text: `Preferred model set to: ${newModel}` };
         }
@@ -705,10 +560,6 @@ const tokenRangerPlugin = {
             fresh.plugins.entries = entries;
             await api.runtime.config.writeConfigFile(fresh);
             api.logger.info(`[tokenranger] plugin ${newEnabled ? "enabled" : "disabled"}`);
-
-            if (isDiscord) {
-              return buildDiscordMainMenu();
-            }
 
             return {
               text: `TokenRanger ${newEnabled ? "enabled" : "disabled"}. Restart gateway to take effect.`,
