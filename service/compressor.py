@@ -113,6 +113,10 @@ class ContextCompressor:
             )
         parts.append(
             "Summarize as factual state. Do NOT use first-person ('I'll...', 'I will...'). "
+            "IMPORTANT: If an assistant turn contains only planning statements without a "
+            "concrete result (e.g. 'Let me check...', 'I'll investigate...', "
+            "'I need to verify...', 'Checking now...'), discard it entirely — "
+            "do NOT summarize the intent, only summarize completed actions and their results. "
             "Output as: '[T<n>] bullet summary' for each turn."
         )
         return " ".join(parts)
@@ -138,6 +142,10 @@ class ContextCompressor:
             "Extract only: key decisions made, current state of work, "
             "open questions, and user preferences. "
             "Discard greetings, pleasantries, and redundant information. "
+            "Discard any assistant turn that contains only planning statements without a "
+            "concrete result (e.g. 'Let me check...', 'I'll investigate...', "
+            "'Checking now...', 'I need to verify...') — summarize only completed "
+            "actions and their results, never unexecuted intent. "
             "Summarize as factual state. Do NOT use first-person "
             "('I'll...', 'I will...', 'Let me...'). "
             + turn_guidance
@@ -196,6 +204,8 @@ class ContextCompressor:
              + "Extract key facts from this tagged conversation as a short bullet list. "
              "Each turn is tagged as [T<n>:<role>|<size>] or [T<n>:<role>|<size>|code]. "
              "Max 10 bullets. Only include decisions, state, and open items. "
+             "Skip any assistant turn that is only planning statements with no result "
+             "('Let me check...', 'I'll investigate...', 'Checking now...'). "
              "Do NOT use first-person phrasing ('I'll...', 'I will...', 'Let me...'). "
              "Output as: '- [T<n>] fact' for each relevant turn."
              + preserve_note),
