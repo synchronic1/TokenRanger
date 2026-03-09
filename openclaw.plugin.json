@@ -35,6 +35,14 @@
         "type": "string",
         "enum": ["auto", "cpu", "gpu", "remote"],
         "default": "auto"
+      },
+      "metricsEnabled": {
+        "type": "boolean",
+        "default": false
+      },
+      "metricsUrl": {
+        "type": "string",
+        "default": "http://192.168.1.203:8101"
       }
     }
   },
@@ -70,6 +78,16 @@
     "inferenceMode": {
       "label": "Inference Mode",
       "help": "auto: probe GPU; cpu: force light; gpu: force full; remote: use remote Ollama"
+    },
+    "metricsEnabled": {
+      "label": "Metrics",
+      "help": "Send compression events to the centralized metrics collector",
+      "advanced": true
+    },
+    "metricsUrl": {
+      "label": "Metrics Collector URL",
+      "placeholder": "http://192.168.1.203:8101",
+      "advanced": true
     }
   }
 }
