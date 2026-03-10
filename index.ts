@@ -169,6 +169,18 @@ const tokenRangerPlugin = {
           }
           if (!content) continue;
 
+          // Strip agent step-indicator lines (e.g. "→ Checking:", "→ Executing:", "→ Restarting:")
+          // from ALL roles. These are internal UI artifacts. Crucially, old compressed summaries
+          // are re-injected as user messages (<session-summary>), so stripping assistant-only
+          // is insufficient — the leaked arrows re-enter as user content on the next turn.
+          content = content
+            .split("\n")
+            .filter((line) => !/^→\s*\S/.test(line.trim()))
+            .join("\n")
+            .trim();
+
+          if (!content) continue;
+
           if (role === "user") userTurnCount++;
           turnIndex++;
 

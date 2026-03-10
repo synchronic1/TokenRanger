@@ -55,6 +55,15 @@ class ContextCompressor:
         if model_override:
             profile = dataclasses.replace(profile, model=model_override)
 
+        # Strip agent step-indicator lines before any compression path.
+        # Lines starting with → (e.g. "→ Checking:", "→ Reading:", "→ Starting:")
+        # are internal runtime UI artifacts. If they reach the SLM, the model echoes
+        # them back, and the next turn amplifies the loop — planning voice leakage.
+        session_history = "\n".join(
+            line for line in session_history.splitlines()
+            if not line.lstrip().startswith("\u2192")
+        )
+
         # Guard: skip LLM if there is nothing meaningful to compress
         total_input = len(session_history.strip()) + len(lance_results.strip())
         if total_input < 50:
@@ -224,7 +233,18 @@ class ContextCompressor:
         truncated = "\n".join(lines[-20:]) if len(lines) > 20 else session_history
         return self._format_context(truncated, lance_results)
 
+    @staticmethod
+    def _strip_arrow_lines(text: str) -> str:
+        """Remove any → step-indicator lines from SLM output.
+        Applied to compressed output so leaked arrows never enter the session history,
+        regardless of whether they came from the input or were hallucinated by the SLM."""
+        return "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith("\u2192")
+        ).strip()
+
     def _format_context(self, history: str, memories: str) -> str:
+        history = self._strip_arrow_lines(history)
         parts = []
         if history:
             parts.append(f"<session-summary>\n{history}\n</session-summary>")
