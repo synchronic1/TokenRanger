@@ -136,6 +136,32 @@ const tokenRangerPlugin = {
     // ========================================================================
 
     api.on("before_agent_start", async (event, ctx) => {
+      // ── Guard: skip compression if last assistant message has thinking blocks ──
+      // Anthropic API rejects requests where thinking/redacted_thinking blocks in
+      // the latest assistant message have been modified. Since TokenRanger only
+      // extracts type==="text" blocks when building session history, thinking blocks
+      // would be silently dropped — never safe to compress in this state.
+      if (event.messages && Array.isArray(event.messages)) {
+        const lastAsst = [...event.messages]
+          .reverse()
+          .find((m) => m && typeof m === "object" && (m as Record<string, unknown>).role === "assistant");
+        if (lastAsst && Array.isArray((lastAsst as Record<string, unknown>).content)) {
+          const hasThinkingBlock = ((lastAsst as Record<string, unknown>).content as Array<Record<string, unknown>>)
+            .some((b) => b && (b.type === "thinking" || b.type === "redacted_thinking"));
+          if (hasThinkingBlock) {
+            api.logger.debug?.(
+              "[tokenranger] Last assistant message has thinking blocks — skipping compression to preserve verbatim",
+            );
+            emitMetrics({
+              user_turn: 0,
+              skipped: true,
+              skip_reason: "thinking_blocks",
+            });
+            return;
+          }
+        }
+      }
+
       // ── Build structured turn list from messages ──────────────────────
       type TurnMeta = {
         n: number;
