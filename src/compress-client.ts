@@ -58,6 +58,10 @@ export async function compressContext(req: CompressRequest): Promise<CompressRes
 
     try {
       if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        console.debug?.(
+          `[tokenranger] compress service returned ${response.status}: ${body.slice(0, 200)}`,
+        );
         return null;
       }
 

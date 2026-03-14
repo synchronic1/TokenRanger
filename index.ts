@@ -44,7 +44,10 @@ const tokenRangerPlugin = {
     let cfg: TokenRangerConfig = parseConfig(api.pluginConfig);
     const nodeHostname = os.hostname();
 
-    // Detect if the chat model is local (Ollama/MLX) and adjust timeouts
+    // Per-session disable: `/tokenranger no` sets this for the current gateway lifetime
+    let sessionDisabled = false;
+
+    // Detect if the chat model is local (Ollama/MLX) and adjust timeouts at registration
     let isLocalChatModel = false;
     try {
       const fullConfig = api.runtime.config.loadConfig();
@@ -56,26 +59,33 @@ const tokenRangerPlugin = {
       isLocalChatModel =
         primaryModel.startsWith("ollama/") || primaryModel.startsWith("mlx-local/");
 
-      if (isLocalChatModel) {
-        // Auto-increase compression timeout for local models (Apple Silicon/CPU
-        // compression takes 3-14s vs 1-3s on NVIDIA GPU)
-        if (cfg.timeoutMs <= 10_000) {
-          cfg.timeoutMs = 30_000;
-          api.logger.info(
-            `[tokenranger] Local chat model detected (${primaryModel}). ` +
-              `Compression timeout increased to ${cfg.timeoutMs}ms`,
-          );
-        }
+      if (isLocalChatModel && cfg.timeoutMs <= 10_000) {
+        cfg.timeoutMs = 30_000;
+        api.logger.info(
+          `[tokenranger] Local chat model detected (${primaryModel}). ` +
+            `Compression timeout increased to ${cfg.timeoutMs}ms`,
+        );
+      }
 
+      // CPU inference mode: bump base timeout at registration (not per-request)
+      if (cfg.inferenceMode === "cpu" && cfg.timeoutMs < 60_000) {
+        cfg.timeoutMs = 60_000;
+        api.logger.info(
+          `[tokenranger] CPU inference mode — compression timeout set to ${cfg.timeoutMs}ms`,
+        );
+      }
+
+      if (isLocalChatModel) {
         // Ensure agent timeout is sufficient for local model inference + compression.
-        // Local models need: compression (3-14s) + model swap (5-15s) + inference (30-120s).
-        // Minimum recommended: 300s.
         const agentTimeout = fullConfig?.agents?.defaults?.timeoutSeconds ?? 600;
         if (agentTimeout < 300) {
-          const updated = { ...fullConfig };
-          updated.agents = updated.agents ?? {};
-          updated.agents.defaults = updated.agents.defaults ?? {};
-          updated.agents.defaults.timeoutSeconds = 300;
+          const updated = {
+            ...fullConfig,
+            agents: {
+              ...fullConfig?.agents,
+              defaults: { ...fullConfig?.agents?.defaults, timeoutSeconds: 300 },
+            },
+          };
           api.runtime.config.writeConfigFile(updated).catch((err: unknown) => {
             api.logger.warn(
               `[tokenranger] Failed to update agent timeout: ${String(err)}`,
@@ -136,6 +146,9 @@ const tokenRangerPlugin = {
     // ========================================================================
 
     api.on("before_agent_start", async (event, ctx) => {
+      // ── Guard: session-level disable via `/tokenranger no` ──
+      if (sessionDisabled) return;
+
       // ── Guard: skip compression if last assistant message has thinking blocks ──
       // Anthropic API rejects requests where thinking/redacted_thinking blocks in
       // the latest assistant message have been modified. Since TokenRanger only
@@ -300,10 +313,10 @@ const tokenRangerPlugin = {
       const modelOverride = cfg.preferredModel ? cfg.preferredModel : undefined;
 
       try {
-        // Scale compression timeout with input size for local models.
-        // Base timeout + 5ms per char keeps pace with ~200 tok/s throughput.
+        // Scale compression timeout with input size for local/CPU models.
+        // Base timeouts already set at registration: 60s for CPU, 30s for local chat.
         let effectiveTimeout = cfg.timeoutMs;
-        if (isLocalChatModel && taggedHistory.length > 2000) {
+        if ((isLocalChatModel || cfg.inferenceMode === "cpu") && taggedHistory.length > 2000) {
           effectiveTimeout = Math.max(
             cfg.timeoutMs,
             Math.min(cfg.timeoutMs + Math.ceil(taggedHistory.length * 5), 120_000),
@@ -436,6 +449,7 @@ const tokenRangerPlugin = {
             `Service: ${serviceInfo}`,
             `Mode: ${mode} | Model: ${model}`,
             `Enabled: ${enabled ? "yes" : "no"}`,
+            ...(sessionDisabled ? ["Session: PAUSED (/tokenranger yes to resume)"] : []),
           ].join("\n");
 
           if (isTelegram) {
@@ -584,6 +598,20 @@ const tokenRangerPlugin = {
           return { text: `Preferred model set to: ${newModel}` };
         }
 
+        // ── /tokenranger no — disable compression for this session ──────
+        if (args === "no" || args === "off") {
+          sessionDisabled = true;
+          api.logger.info("[tokenranger] Compression disabled for this session");
+          return { text: "TokenRanger disabled for this session. Use /tokenranger yes to re-enable." };
+        }
+
+        // ── /tokenranger yes — re-enable compression for this session ───
+        if (args === "yes" || args === "on") {
+          sessionDisabled = false;
+          api.logger.info("[tokenranger] Compression re-enabled for this session");
+          return { text: "TokenRanger re-enabled." };
+        }
+
         // ── /tokenranger toggle ──────────────────────────────────────────
         if (args === "toggle") {
           try {
@@ -610,11 +638,13 @@ const tokenRangerPlugin = {
         // ── fallback ─────────────────────────────────────────────────────
         return {
           text:
-            "Usage: /tokenranger [mode|model|toggle]\n\n" +
+            "Usage: /tokenranger [mode|model|toggle|no|yes]\n\n" +
             "/tokenranger — show settings\n" +
             "/tokenranger mode — set inference mode (cpu/gpu/remote/auto)\n" +
             "/tokenranger model — select Ollama model\n" +
-            "/tokenranger toggle — enable/disable",
+            "/tokenranger toggle — enable/disable (persisted)\n" +
+            "/tokenranger no — disable compression for this session\n" +
+            "/tokenranger yes — re-enable compression for this session",
         };
       },
     });

@@ -133,6 +133,11 @@ class InferenceRouter:
                 json={"model": model, "prompt": "", "raw": True, "stream": False},
                 timeout=max(self.settings.ollama_timeout, 10.0),
             )
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            logger.warning("probe: generate-based model load failed: %s", e)
+            return ComputeClass.CPU_ONLY
+
+        try:
             ps_resp = await client.get(f"{url}/api/ps")
             if ps_resp.status_code == 200:
                 running = ps_resp.json().get("models", [])
@@ -145,8 +150,8 @@ class InferenceRouter:
                             return ComputeClass.GPU_FULL
                         elif size_vram > 0:
                             return ComputeClass.GPU_PARTIAL
-        except Exception as e:
-            logger.warning("probe: generate-based compute inference failed: %s", e)
+        except (httpx.ConnectError, httpx.TimeoutException, ValueError, KeyError) as e:
+            logger.warning("probe: post-generate ps query failed: %s", e)
         return ComputeClass.CPU_ONLY
 
     def _build_profile(

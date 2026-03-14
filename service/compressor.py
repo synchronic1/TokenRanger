@@ -30,6 +30,10 @@ class ContextCompressor:
         """Return a cached ChatOllama instance keyed on (model, base_url, num_ctx, temperature)."""
         key = (profile.model, profile.endpoint_url, profile.max_context, temperature)
         if key not in self._llm_cache:
+            # Cap cache at 8 entries to prevent unbounded growth from model cycling
+            if len(self._llm_cache) >= 8:
+                oldest_key = next(iter(self._llm_cache))
+                del self._llm_cache[oldest_key]
             self._llm_cache[key] = ChatOllama(
                 model=profile.model,
                 base_url=profile.endpoint_url,

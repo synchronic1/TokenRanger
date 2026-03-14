@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     cpu_compression_model: str = "qwen3:1.7b"
     cpu_fast_model: str = "qwen3:1.7b"
-    cpu_max_context: int = 4096
+    cpu_max_context: int = 8192
 
     probe_cache_ttl: float = 300.0
 

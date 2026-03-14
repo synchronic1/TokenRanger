@@ -29,7 +29,12 @@ Graceful degradation: service down → full passthrough; Ollama down → truncat
 ## Build & Development
 
 ```bash
-# Build TypeScript plugin
+# Full dependency install (Node + Python + Ollama + models)
+./scripts/install.sh               # auto-detects GPU
+./scripts/install.sh --cpu-only    # force CPU mode (qwen3:1.7b only)
+./scripts/install.sh --skip-ollama # skip Ollama install + model pull
+
+# Build TypeScript plugin only
 npm install && npm run build    # outputs to dist/
 
 # Clean build artifacts
@@ -38,6 +43,8 @@ npm run clean
 # No unit test suite or linter — testing is done live against OpenClaw deployments
 # See TESTING.md for verification procedures
 ```
+
+`npm install` runs `scripts/postinstall.mjs` which auto-links the openclaw SDK from sibling directories or `OPENCLAW_SDK_PATH` env var.
 
 TypeScript: strict mode, ES2022 target, Node16 module resolution. No runtime npm dependencies — only `@types/node` and `typescript` as devDeps. Python service files are copied as-is (no build step).
 
@@ -135,6 +142,7 @@ The plugin uses a mutable `cfg` ref parsed from `api.pluginConfig`. Slash comman
 
 ## Hook Behavior Details
 
+- **Session disable**: `/tokenranger no` (or `off`) disables compression for the current gateway session without touching config; `/tokenranger yes` (or `on`) re-enables. Uses an in-memory `sessionDisabled` flag checked at the top of the hook
 - **Turn 1 skip**: First turn is never compressed — preserves initial system/user constraints intact
 - **Code block stripping**: Fenced code blocks (`` ``` ``) are removed per-turn before compression; the `has_code` flag is set in turn metadata so the compressor notes "code discussed" in summaries
 - **Content extraction**: Handles both plain string and array content block formats (`[{type:"text", text:"..."}]`)
