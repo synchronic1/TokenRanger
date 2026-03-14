@@ -15,20 +15,40 @@ User message → OpenClaw gateway
 
 ## Requirements
 
+- **Node.js** 18+ and npm
 - **Ollama** installed and running (GPU recommended, works on CPU)
 - **Python 3.10+** with pip
 - ~2GB disk (venv + model)
 
 ## Quick Start
 
+### One-line install (all dependencies)
+
 ```bash
-# 1. Enable the plugin
+./scripts/install.sh
+```
+
+This installs Node dependencies, Python venv + packages, Ollama, and pulls the right model based on GPU detection. Flags:
+
+| Flag | Effect |
+|------|--------|
+| `--cpu-only` | Force CPU mode — pulls qwen3:1.7b only, skips GPU detection |
+| `--skip-ollama` | Skip Ollama install and model pull |
+| `--skip-build` | Skip npm install and TypeScript build |
+
+### Manual install
+
+```bash
+# 1. Install Node dependencies + build
+npm install && npm run build
+
+# 2. Enable the plugin
 openclaw plugins enable tokenranger
 
-# 2. Install the compression service
+# 3. Install the compression service (Python venv, Ollama model, system service)
 openclaw tokenranger setup
 
-# 3. Restart the gateway
+# 4. Restart the gateway
 openclaw gateway restart
 ```
 
@@ -49,7 +69,9 @@ Add to `~/.openclaw/openclaw.json`:
           "ollamaUrl": "http://127.0.0.1:11434",
           "preferredModel": "qwen3:8b",
           "compressionStrategy": "auto",
-          "inferenceMode": "auto"
+          "inferenceMode": "auto",
+          "metricsEnabled": false,
+          "metricsUrl": "http://192.168.1.203:8101"
         }
       }
     }
@@ -60,12 +82,14 @@ Add to `~/.openclaw/openclaw.json`:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `serviceUrl` | `http://127.0.0.1:8100` | Compression service URL |
-| `timeoutMs` | `10000` | Max wait before passthrough (ms) |
+| `timeoutMs` | `10000` | Max wait before passthrough (ms). Auto-adjusted: 30s for local chat models, 60s for CPU inference mode |
 | `minPromptLength` | `500` | Minimum history length (chars) to trigger compression |
 | `ollamaUrl` | `http://127.0.0.1:11434` | Ollama API endpoint |
 | `preferredModel` | `qwen3:8b` | Ollama model for compression |
 | `compressionStrategy` | `auto` | `auto`/`full`/`light`/`passthrough` |
 | `inferenceMode` | `auto` | `auto`/`cpu`/`gpu`/`remote` — controls inference strategy override |
+| `metricsEnabled` | `false` | Enable fire-and-forget metrics emission to centralized collector |
+| `metricsUrl` | `http://192.168.1.203:8101` | Metrics collector endpoint |
 
 ## CLI Commands
 
@@ -76,13 +100,40 @@ openclaw tokenranger status      # Check service health
 openclaw tokenranger uninstall   # Remove service
 ```
 
-## Slash Command
+## Slash Commands
 
 Use `/tokenranger` in any chat to access the settings menu:
 
-- **Mode** — Set inference mode (CPU / GPU / Remote / Auto)
-- **Model** — Select from pulled Ollama models
-- **Enable/Disable** — Toggle the plugin on/off
+| Command | Description |
+|---------|-------------|
+| `/tokenranger` | Show current settings and service status |
+| `/tokenranger mode` | Set inference mode (CPU / GPU / Remote / Auto) |
+| `/tokenranger model` | Select from pulled Ollama models |
+| `/tokenranger toggle` | Enable/disable the plugin (persisted to config) |
+| `/tokenranger no` | Disable compression for this session only |
+| `/tokenranger yes` | Re-enable compression for this session |
+
+`/tokenranger no` is useful when you want full uncompressed context for a specific conversation without changing global settings. The disable is in-memory only — a gateway restart resets it. Aliases: `off`/`on`.
+
+## CPU Inference (16GB Shared RAM)
+
+TokenRanger supports CPU-only inference for users without a discrete GPU. The `light` compression strategy uses `qwen3:1.7b` (~1.1GB) for extractive bullet-point summarization — fast enough on modern x86 and Apple Silicon CPUs.
+
+```bash
+# Install with CPU-only mode
+./scripts/install.sh --cpu-only
+
+# Or set via slash command
+/tokenranger mode cpu
+```
+
+**CPU defaults:**
+- Model: `qwen3:1.7b` (Q4_K_M, ~1.1GB RAM)
+- Strategy: `light` — extractive bullets, max 10 per turn
+- Max context: 8192 tokens
+- Timeout: 60s base, scales with input size (+5ms/char, capped at 120s)
+
+On Apple Silicon with 16GB unified memory, Ollama uses Metal GPU by default — TokenRanger auto-detects this as GPU mode. For x86 Linux/Windows without a GPU, `cpu` mode is automatically selected when no VRAM is detected.
 
 ## Architecture
 
@@ -115,12 +166,24 @@ Use `/tokenranger` in any chat to access the settings menu:
 └─────────────────────────────────────────────┘
 ```
 
+## Turn Tagging
+
+Messages are serialized with structured tags before compression:
+
+```
+[T1:user|520c] Scrape 100 luxury apartments...
+[T2:asst|1.2k|code] Verified initial URLs, updated script...
+[T3:user|180c] Also add Broadstone properties
+```
+
+Tag format: `[T{n}:{role}|{size}{|flags}]` where `n` is the turn number, `role` is `user` or `asst`, `size` is the original character count, and `|code` flags turns that contained code blocks (stripped before compression).
+
 ## Compression Strategies
 
 | Strategy | When | Model | Description |
 |----------|------|-------|-------------|
 | `full` | GPU available (>80% VRAM) | qwen3:8b | Deep semantic summarization |
-| `light` | CPU only | qwen3:1.7b | Extractive bullet points |
+| `light` | CPU only | qwen3:1.7b | Extractive bullet points, max 10 |
 | `passthrough` | Ollama down | none | Truncate to last 20 lines |
 
 ## Measured Results
@@ -191,7 +254,8 @@ a 32k model's effective capacity becomes equivalent to ~160k uncompressed.
 
 **Automatic timeout adjustment**: When TokenRanger detects a local chat model, it
 automatically increases the compression timeout (10s → 30s), scales it with input size,
-and ensures the agent timeout is at least 300s. No manual timeout tuning needed.
+and ensures the agent timeout is at least 300s. CPU inference mode (`/tokenranger mode cpu`)
+uses a 60s base timeout to accommodate cold-start model loading on x86 CPUs.
 
 **Requirements**: OpenClaw's hard minimum context is 16k tokens — any model above this
 threshold works. Tested with qwen2.5:7b (131k) and qwen3:8b (32k) on Apple Silicon.
@@ -204,6 +268,7 @@ The plugin never blocks or breaks the gateway:
 1. **Service down**: `before_agent_start` catch returns `undefined` → full context sent to LLM
 2. **Ollama down**: Python service returns `passthrough` strategy → truncated context
 3. **Timeout**: AbortController cancels after `timeoutMs` → full context sent
+4. **Session disabled**: `/tokenranger no` → hook returns immediately, zero overhead
 
 ## Troubleshooting
 
