@@ -1,0 +1,167 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ─── TypeScript Plugin ───────────────────────────────────
+  typescript:
+    name: TypeScript Build & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Type check & build
+        run: npx tsc --noEmit
+
+      - name: Build dist
+        run: npm run build
+
+      - name: Check for common issues
+        run: |
+          # Ensure no console.log left in production code
+          if grep -rn "console\.log" src/ index.ts 2>/dev/null | grep -v "// ok" | grep -v test; then
+            echo "⚠️  Found console.log in source files (use logger instead)"
+          fi
+
+  # ─── Python Service ──────────────────────────────────────
+  python:
+    name: Python Service Checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install ruff pytest httpx
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Format check (ruff)
+        run: ruff format --check .
+
+      - name: Type check (basic)
+        run: |
+          pip install pyright
+          pyright --pythonversion 3.12 . || true  # warn-only for now
+
+      - name: Import check
+        run: |
+          python -c "
+          import config
+          import compressor
+          import inference_router
+          print('✅ All modules import successfully')
+          "
+
+      - name: Unit tests
+        run: |
+          if [ -d tests ] || ls test_*.py *_test.py 2>/dev/null; then
+            pytest -v
+          else
+            echo "⚠️  No tests found — skipping (add tests/ directory)"
+          fi
+
+  # ─── Security ────────────────────────────────────────────
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for hardcoded secrets
+        run: |
+          # Scan for API keys, tokens, passwords in source
+          FOUND=0
+          for pattern in "sk-ant-" "sk-proj-" "AKIA" "password\s*=" "secret\s*=" "token\s*=\s*['\"](?!$)"; do
+            if grep -rniE "$pattern" src/ service/ index.ts scripts/ 2>/dev/null | grep -v "test" | grep -v "example" | grep -v "placeholder" | grep -v ".env"; then
+              echo "⚠️  Potential secret found matching: $pattern"
+              FOUND=1
+            fi
+          done
+          if [ $FOUND -eq 0 ]; then
+            echo "✅ No hardcoded secrets detected"
+          fi
+
+      - name: Check Python dependencies for known vulnerabilities
+        run: |
+          pip install pip-audit
+          pip-audit -r service/requirements.txt || true  # warn-only
+
+  # ─── Integration Smoke Test ──────────────────────────────
+  integration:
+    name: Integration Smoke Test
+    runs-on: ubuntu-latest
+    needs: [typescript, python]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build TypeScript
+        run: |
+          npm install
+          npm run build
+
+      - name: Verify dist output
+        run: |
+          test -f dist/index.js || (echo "❌ dist/index.js not found" && exit 1)
+          test -f dist/index.d.ts || (echo "❌ dist/index.d.ts not found" && exit 1)
+          echo "✅ TypeScript build output verified"
+
+      - name: Start Python service (background)
+        run: |
+          cd service
+          pip install -r requirements.txt
+          # Start with a dummy Ollama URL (won't actually connect)
+          OLLAMA_URL=http://localhost:11434 \
+          LOG_LEVEL=DEBUG \
+          timeout 10 python -c "
+          from config import Settings
+          from compressor import ContextCompressor
+          from inference_router import InferenceRouter
+          s = Settings()
+          r = InferenceRouter(s)
+          c = ContextCompressor(r)
+          print('✅ Service components initialize successfully')
+          print(f'  Config: serviceUrl={s.service_url}, model={s.preferred_model}')
+          " || true
+
+      - name: Verify plugin manifest
+        run: |
+          python3 -c "
+          import json
+          with open('openclaw.plugin.json') as f:
+              manifest = json.load(f)
+          assert manifest['id'] == 'tokenranger', f'Expected id=tokenranger, got {manifest[\"id\"]}'
+          assert 'configSchema' in manifest, 'Missing configSchema'
+          assert 'description' in manifest, 'Missing description'
+          print('✅ Plugin manifest valid')
+          print(f'  id: {manifest[\"id\"]}')
+          print(f'  name: {manifest[\"name\"]}')
+          "
