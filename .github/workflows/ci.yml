@@ -21,17 +21,24 @@ jobs:
       - name: Install dependencies
         run: |
           npm install
-          # Install openclaw as dev dependency for type checking (peer dep at runtime)
           npm install openclaw@latest --no-save 2>/dev/null || true
+          # Stub any missing SDK exports for CI (unreleased APIs)
+          SDK_DIR=$(node -e "try{console.log(require.resolve('openclaw/plugin-sdk').replace(/\/[^/]+$/,''))}catch{}" 2>/dev/null)
+          if [ -n "$SDK_DIR" ] && [ -d "$SDK_DIR" ]; then
+            # Check if fetchWithSsrFGuard exists, if not create a stub
+            if ! grep -q "fetchWithSsrFGuard" "$SDK_DIR/index.d.ts" 2>/dev/null; then
+              echo "export declare function fetchWithSsrFGuard(url: string, init?: RequestInit): Promise<Response>;" >> "$SDK_DIR/index.d.ts"
+              echo "export const fetchWithSsrFGuard: any;" >> "$SDK_DIR/index.js" 2>/dev/null || true
+              echo "Stubbed fetchWithSsrFGuard in plugin-sdk for CI"
+            fi
+          fi
 
       - name: Type check
         run: npx tsc --noEmit 2>&1 || echo "⚠️ Type errors found (see above)"
-        continue-on-error: true  # Plugin SDK types may not resolve in CI; track but don't block
+        continue-on-error: true
 
       - name: Build dist
         run: npx tsc --skipLibCheck
-        # skipLibCheck needed: plugin uses unreleased openclaw SDK APIs
-        # (fetchWithSsrFGuard) not yet in published package
 
       - name: Check for common issues
         run: |
